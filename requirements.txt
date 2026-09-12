@@ -1,0 +1,26 @@
+# Çekirdek (her zaman gerekli)
+pillow
+edge-tts
+python-pptx
+pymupdf
+pygments
+python-dotenv
+requests
+onnxruntime
+piper-tts
+google-genai
+fastapi
+uvicorn
+python-multipart
+
+# Opsiyonel: ElevenLabs bulut TTS (sadece 'requests' zaten yeterli, ek paket gerekmez)
+
+# Opsiyonel: Coqui XTTS v2 (offline + ses klonlama) — ağır, ayrı kurulur:
+#   venv\Scripts\python.exe install_coqui.py
+# coqui-tts
+# torch --index-url https://download.pytorch.org/whl/cpu
+# torchaudio --index-url https://download.pytorch.org/whl/cpu
+# torchcodec --index-url https://download.pytorch.org/whl/cpu
+# transformers<5.0,>=4.57
+# tokenizers>=0.22.0,<=0.23.0
+# huggingface-hub>=0.34.0,<1.0

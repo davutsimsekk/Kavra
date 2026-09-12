@@ -1,0 +1,34 @@
+# --- Gizli bilgiler (asla commit'leme) ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Önbellek / çalışma zamanı dosyaları ---
+_cache/
+*.log
+
+# --- İndirilen TTS modelleri (60 MB+ binary, yeniden indirilebilir) ---
+models/
+
+# --- Kullanıcı verisi ve üretilen ders videoları ---
+projects/
+settings.json
+/ders.mp3
+/ders.mp4
+
+# --- Web arayüzü ---
+webui/node_modules/
+webui/dist/
+
+# --- İç geliştirme notları (yayınlamak istersen bu satırı kaldır) ---
+HANDOFF.md
+
+# --- OS çöpü ---
+Thumbs.db
+Desktop.ini
