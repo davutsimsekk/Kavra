@@ -590,7 +590,7 @@ class GenerateEndpointDiagramExtractionTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
 
 
-class FlashcardEndpointTests(unittest.TestCase):
+class FlashcardDeckEndpointTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app, base_url="http://localhost")
 
@@ -598,94 +598,233 @@ class FlashcardEndpointTests(unittest.TestCase):
     def _slide():
         return Slide(title="Kesmeler", narration="Kesmeler hakkında anlatım.", bullets=["İşlemci kesme isteği alır"])
 
-    def test_get_auto_generates_deck_when_none_exists_yet(self):
+    def _create_deck(self, project_id, name="Deste A", kind="static"):
+        return self.client.post(
+            f"/api/projects/{project_id}/flashcards/decks",
+            headers={"Origin": "http://127.0.0.1:5173"}, json={"name": name, "kind": kind},
+        )
+
+    def _wait_for_job(self, job_id: str) -> dict:
+        job = {}
+        for _ in range(50):
+            job = self.client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] in {"complete", "failed"}:
+                break
+            time.sleep(0.05)
+        return job
+
+    def test_list_decks_is_empty_until_one_is_created(self):
         with _temp_project([self._slide()]) as pdir:
-            response = self.client.get(f"/api/projects/{pdir.name}/flashcards")
+            response = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["decks"], [])
+
+    def test_create_deck_requires_slides(self):
+        with _temp_project([]) as pdir:
+            response = self._create_deck(pdir.name)
+            self.assertEqual(response.status_code, 400)
+
+    def test_create_deck_generates_cards_and_is_listed(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self._create_deck(pdir.name, name="Sınav Öncesi")
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertGreater(len(data["deck"]), 0)
-            self.assertEqual(data["summary"]["totalCards"], len(data["deck"]))
-            self.assertTrue((pdir / "flashcards.json").exists())
+            self.assertEqual(data["name"], "Sınav Öncesi")
+            self.assertEqual(data["kind"], "static")
+            self.assertGreater(len(data["cards"]), 0)
+            self.assertEqual(data["summary"]["totalCards"], len(data["cards"]))
 
-    def test_get_without_slides_returns_empty_deck_not_an_error(self):
-        with _temp_project([]) as pdir:
-            response = self.client.get(f"/api/projects/{pdir.name}/flashcards")
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["deck"], [])
+            listed = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks").json()["decks"]
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["id"], data["id"])
 
-    def test_regenerate_requires_slides(self):
-        with _temp_project([]) as pdir:
+    def test_multiple_decks_can_coexist(self):
+        with _temp_project([self._slide()]) as pdir:
+            self._create_deck(pdir.name, name="Deste A")
+            self._create_deck(pdir.name, name="Deste B")
+            listed = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks").json()["decks"]
+            self.assertEqual({d["name"] for d in listed}, {"Deste A", "Deste B"})
+
+    def test_llm_kind_queues_a_job_and_creates_the_deck(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("app.llm.agent_cli_provider.AgentCliNarrationGenerator") as fake_cls:
+                fake_cls.return_value._call.return_value = (
+                    '[{"kind": "basic", "front": "Kesme nedir?", "back": "Bir donanım sinyalidir."}]'
+                )
+                fake_cls.return_value.total_cost_usd = 0.0
+
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/flashcards/decks",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"name": "YZ Destesi", "kind": "llm", "provider": "agent",
+                          "count": 5, "focusPrompt": "kesmelere odaklan"},
+                )
+                self.assertEqual(response.status_code, 200)
+                job = self._wait_for_job(response.json()["jobId"])
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                deck = job["result"]["deck"]
+                self.assertEqual(deck["kind"], "llm")
+                self.assertEqual(deck["focusPrompt"], "kesmelere odaklan")
+                self.assertEqual(deck["cards"][0]["front"], "Kesme nedir?")
+
+                sent_prompt = fake_cls.return_value._call.call_args[0][0]
+                self.assertIn("5", sent_prompt)
+                self.assertIn("kesmelere odaklan", sent_prompt)
+
+            listed = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks").json()["decks"]
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0]["kind"], "llm")
+
+    def test_llm_kind_job_fails_clearly_when_model_returns_no_cards(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("app.llm.agent_cli_provider.AgentCliNarrationGenerator") as fake_cls:
+                fake_cls.return_value._call.return_value = "[]"
+                fake_cls.return_value.total_cost_usd = 0.0
+
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/flashcards/decks",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"name": "YZ Destesi", "kind": "llm", "provider": "agent"},
+                )
+                job = self._wait_for_job(response.json()["jobId"])
+                self.assertEqual(job["status"], "failed")
+
+    def test_unknown_deck_kind_is_rejected(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self._create_deck(pdir.name, kind="sihirli")
+            self.assertEqual(response.status_code, 400)
+
+    def test_llm_count_out_of_range_is_rejected(self):
+        with _temp_project([self._slide()]) as pdir:
             response = self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/generate",
+                f"/api/projects/{pdir.name}/flashcards/decks",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"name": "YZ Destesi", "kind": "llm", "count": 999},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_regenerate_is_rejected_for_llm_decks(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("app.llm.agent_cli_provider.AgentCliNarrationGenerator") as fake_cls:
+                fake_cls.return_value._call.return_value = '[{"kind": "basic", "front": "a", "back": "b"}]'
+                fake_cls.return_value.total_cost_usd = 0.0
+
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/flashcards/decks",
+                    headers={"Origin": "http://127.0.0.1:5173"}, json={"name": "YZ Destesi", "kind": "llm"},
+                )
+                deck = self._wait_for_job(response.json()["jobId"])["result"]["deck"]
+
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/generate",
                 headers={"Origin": "http://127.0.0.1:5173"},
             )
             self.assertEqual(response.status_code, 400)
 
+    def test_get_unknown_deck_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks/yok")
+            self.assertEqual(response.status_code, 404)
+
     def test_regenerate_preserves_progress_for_unchanged_cards(self):
         with _temp_project([self._slide()]) as pdir:
-            first = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
-            card_id = first["deck"][0]["id"]
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
             self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/{card_id}/review",
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}/review",
                 headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
             )
 
             regenerated = self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/generate",
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/generate",
                 headers={"Origin": "http://127.0.0.1:5173"},
             ).json()
 
-            card = next(c for c in regenerated["deck"] if c["id"] == card_id)
+            card = next(c for c in regenerated["cards"] if c["id"] == card_id)
             self.assertEqual(card["repetitions"], 1)
+
+    def test_regenerate_unknown_deck_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/yok/generate",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            )
+            self.assertEqual(response.status_code, 404)
 
     def test_review_applies_sm2_scheduling_and_persists(self):
         with _temp_project([self._slide()]) as pdir:
-            data = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
-            card_id = data["deck"][0]["id"]
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
 
             response = self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/{card_id}/review",
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}/review",
                 headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["card"]["repetitions"], 1)
 
-            reloaded = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
-            reloaded_card = next(c for c in reloaded["deck"] if c["id"] == card_id)
+            reloaded = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}").json()
+            reloaded_card = next(c for c in reloaded["cards"] if c["id"] == card_id)
             self.assertEqual(reloaded_card["repetitions"], 1)
 
     def test_review_rejects_unknown_rating(self):
         with _temp_project([self._slide()]) as pdir:
-            data = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
-            card_id = data["deck"][0]["id"]
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
             response = self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/{card_id}/review",
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}/review",
                 headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "excellent"},
             )
             self.assertEqual(response.status_code, 400)
 
     def test_review_unknown_card_is_404(self):
         with _temp_project([self._slide()]) as pdir:
-            self.client.get(f"/api/projects/{pdir.name}/flashcards")
+            deck = self._create_deck(pdir.name).json()
             response = self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/does-not-exist/review",
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/does-not-exist/review",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_review_unknown_deck_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/yok/cards/whatever/review",
                 headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
             )
             self.assertEqual(response.status_code, 404)
 
     def test_suspend_toggles_and_excludes_from_due_count(self):
         with _temp_project([self._slide()]) as pdir:
-            data = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
-            card_id = data["deck"][0]["id"]
-            due_before = data["summary"]["dueCount"]
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
+            due_before = deck["summary"]["dueCount"]
 
             response = self.client.post(
-                f"/api/projects/{pdir.name}/flashcards/{card_id}/suspend",
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}/suspend",
                 headers={"Origin": "http://127.0.0.1:5173"}, json={"suspended": True},
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["summary"]["dueCount"], due_before - 1)
             self.assertTrue(response.json()["card"]["suspended"])
+
+    def test_delete_deck_removes_it_from_the_list(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            response = self.client.delete(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self.client.get(f"/api/projects/{pdir.name}/flashcards/decks").json()["decks"], [])
+
+    def test_delete_unknown_deck_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.delete(
+                f"/api/projects/{pdir.name}/flashcards/decks/yok",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            )
+            self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

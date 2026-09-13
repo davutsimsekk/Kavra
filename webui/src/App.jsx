@@ -179,8 +179,12 @@ export default function App() {
   const [queueItems, setQueueItems] = useState([])
   const [queuePath, setQueuePath] = useState('')
   const [queueBusy, setQueueBusy] = useState(false)
-  const [flashcardDeck, setFlashcardDeck] = useState([])
-  const [flashcardSummary, setFlashcardSummary] = useState(null)
+  const [flashcardDecks, setFlashcardDecks] = useState([])
+  const [activeDeck, setActiveDeck] = useState(null)
+  const [newDeckName, setNewDeckName] = useState('')
+  const [deckKind, setDeckKind] = useState('static')
+  const [deckCount, setDeckCount] = useState('')
+  const [deckFocusPrompt, setDeckFocusPrompt] = useState('')
   const [flashcardBusy, setFlashcardBusy] = useState(false)
   const [reviewQueue, setReviewQueue] = useState([])
   const [reviewCard, setReviewCard] = useState(null)
@@ -254,7 +258,7 @@ export default function App() {
               // Eski oturumlarda (bu özellik eklenmeden önce) view kaydı yok —
               // aktif bir proje varsa geri döndüğümüzde doğrudan video modülüne
               // (kaldığı yere) dönmek, panele atmaktan daha az sürpriz olur.
-              setView(session.view === 'hub' ? 'hub' : 'video')
+              setView(session.view === 'hub' ? 'hub' : session.view === 'anki' ? 'anki' : 'video')
               if (session.activeJob) {
                 api(`/api/jobs/${session.activeJob.id}`)
                   .then((job) => {
@@ -414,8 +418,11 @@ export default function App() {
   }, [showCost])
 
   useEffect(() => {
-    if (view === 'anki' && project) loadFlashcards()
-    if (view !== 'anki') endReviewSession()
+    if (view === 'anki' && project) loadFlashcardDecks()
+    if (view !== 'anki') {
+      setActiveDeck(null)
+      endReviewSession()
+    }
   }, [view, project?.id])
 
   const addToQueue = async () => {
@@ -454,13 +461,12 @@ export default function App() {
     }
   }
 
-  const loadFlashcards = async () => {
+  const loadFlashcardDecks = async () => {
     if (!project) return
     setFlashcardBusy(true)
     try {
-      const data = await api(`/api/projects/${project.id}/flashcards`)
-      setFlashcardDeck(data.deck)
-      setFlashcardSummary(data.summary)
+      const data = await api(`/api/projects/${project.id}/flashcards/decks`)
+      setFlashcardDecks(data.decks)
     } catch (error) {
       setToast({ type: 'error', text: error.message })
     } finally {
@@ -468,13 +474,68 @@ export default function App() {
     }
   }
 
-  const regenerateFlashcards = async () => {
-    if (!project) return
+  const createFlashcardDeck = async () => {
+    if (!project || !newDeckName.trim()) return
+    setFlashcardBusy(true)
+    if (deckKind === 'llm') {
+      try {
+        const response = await api(`/api/projects/${project.id}/flashcards/decks`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: newDeckName.trim(), kind: 'llm',
+            provider: llm.provider, apiKey: llm.apiKey, agentCommand: llm.agentCommand,
+            geminiModel: llm.geminiModel, openaiEndpoint: llm.openaiEndpoint,
+            openaiModel: llm.openaiModel, timeout: llm.timeout,
+            count: deckCount.trim() ? Number(deckCount) : null,
+            focusPrompt: deckFocusPrompt.trim(),
+          }),
+        })
+        setActiveJob({ id: response.jobId, type: 'flashcards' })
+      } catch (error) {
+        setToast({ type: 'error', text: error.message })
+        setFlashcardBusy(false)
+      }
+      return
+    }
+    try {
+      const deck = await api(`/api/projects/${project.id}/flashcards/decks`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newDeckName.trim(), kind: 'static' }),
+      })
+      setNewDeckName('')
+      setFlashcardDecks((current) => [...current, deck])
+      setActiveDeck(deck)
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setFlashcardBusy(false)
+    }
+  }
+
+  const openFlashcardDeck = async (deckId) => {
     setFlashcardBusy(true)
     try {
-      const data = await api(`/api/projects/${project.id}/flashcards/generate`, { method: 'POST' })
-      setFlashcardDeck(data.deck)
-      setFlashcardSummary(data.summary)
+      const deck = await api(`/api/projects/${project.id}/flashcards/decks/${deckId}`)
+      setActiveDeck(deck)
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setFlashcardBusy(false)
+    }
+  }
+
+  const closeFlashcardDeck = () => {
+    setActiveDeck(null)
+    endReviewSession()
+    loadFlashcardDecks()
+  }
+
+  const regenerateActiveDeck = async () => {
+    if (!project || !activeDeck) return
+    setFlashcardBusy(true)
+    try {
+      const deck = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/generate`, { method: 'POST' })
+      setActiveDeck(deck)
       setToast({ type: 'success', text: 'Deste güncel slaytlardan yeniden oluşturuldu.' })
     } catch (error) {
       setToast({ type: 'error', text: error.message })
@@ -483,9 +544,21 @@ export default function App() {
     }
   }
 
+  const deleteFlashcardDeck = async (deckId) => {
+    if (!project) return
+    try {
+      await api(`/api/projects/${project.id}/flashcards/decks/${deckId}`, { method: 'DELETE' })
+      setFlashcardDecks((current) => current.filter((d) => d.id !== deckId))
+      if (activeDeck?.id === deckId) closeFlashcardDeck()
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
   const startReviewSession = () => {
+    if (!activeDeck) return
     const now = Date.now() / 1000
-    const due = flashcardDeck
+    const due = activeDeck.cards
       .filter((c) => !c.suspended && c.dueAt <= now)
       .sort((a, b) => a.dueAt - b.dueAt)
     if (!due.length) return
@@ -502,13 +575,16 @@ export default function App() {
   }
 
   const submitReviewRating = async (rating) => {
-    if (!project || !reviewCard) return
+    if (!project || !activeDeck || !reviewCard) return
     try {
-      const data = await api(`/api/projects/${project.id}/flashcards/${reviewCard.id}/review`, {
+      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${reviewCard.id}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }),
       })
-      setFlashcardDeck((current) => current.map((c) => (c.id === data.card.id ? data.card : c)))
-      setFlashcardSummary(data.summary)
+      setActiveDeck((current) => ({
+        ...current,
+        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
+        summary: data.summary,
+      }))
       setReviewedCount((count) => count + 1)
       if (reviewQueue.length) {
         setReviewCard(reviewQueue[0])
@@ -523,14 +599,17 @@ export default function App() {
   }
 
   const toggleCardSuspend = async (card) => {
-    if (!project) return
+    if (!project || !activeDeck) return
     try {
-      const data = await api(`/api/projects/${project.id}/flashcards/${card.id}/suspend`, {
+      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${card.id}/suspend`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ suspended: !card.suspended }),
       })
-      setFlashcardDeck((current) => current.map((c) => (c.id === data.card.id ? data.card : c)))
-      setFlashcardSummary(data.summary)
+      setActiveDeck((current) => ({
+        ...current,
+        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
+        summary: data.summary,
+      }))
     } catch (error) {
       setToast({ type: 'error', text: error.message })
     }
@@ -622,6 +701,15 @@ export default function App() {
             if (project?.id) {
               api(`/api/projects/${project.id}/chapters`).then(setChapters).catch(() => {})
             }
+          } else if (activeJob.type === 'flashcards') {
+            const deck = job.result.deck
+            setFlashcardDecks((current) => [...current, deck])
+            setActiveDeck(deck)
+            setNewDeckName('')
+            setDeckCount('')
+            setDeckFocusPrompt('')
+            setFlashcardBusy(false)
+            setToast({ type: 'success', text: `"${deck.name}" destesi ${deck.cards.length} kartla oluşturuldu.` })
           } else {
             setProject((current) => ({ ...current, outputs: { video: true, audio: true } }))
             setToast({ type: 'success', text: 'Video ve ses çıktısı hazır.' })
@@ -636,6 +724,7 @@ export default function App() {
           setActiveJob(null)
         } else if (job.status === 'failed') {
           setToast({ type: 'error', text: job.error })
+          if (activeJob.type === 'flashcards') setFlashcardBusy(false)
           setActiveJob(null)
         }
       } catch (error) {
@@ -643,6 +732,7 @@ export default function App() {
           const message = `Yerel API bağlantısı koptu: ${error.message}`
           setJobState({ status: 'failed', kind: activeJob.type, progress: 0, error: message })
           setToast({ type: 'error', text: message })
+          if (activeJob.type === 'flashcards') setFlashcardBusy(false)
           setActiveJob(null)
         }
       }
@@ -1323,39 +1413,108 @@ export default function App() {
     )
   }
 
-  if (view === 'anki') {
+  if (view === 'anki' && !activeDeck) {
     return (
       <div className="dashboard-shell">
         <AmbientBackdrop />
         <button className="button quiet hub-back" onClick={() => setView('hub')}><ArrowLeft size={16} /> Panele dön</button>
+        <div className="dashboard-hero">
+          <span className="kicker">FLASHCARD ÇALIŞMA</span>
+          <h1>{project?.id}</h1>
+          <p>Anki'deki gibi, aynı kaynaktan birden fazla deste tutabilirsin — ör. farklı sınavlar için statik bir deste, belirli bir konuya odaklanan yapay zeka destekli başka bir deste.</p>
+        </div>
+        <div className="anki-overview">
+          <div className="provider-tabs compact">
+            <button className={deckKind === 'static' ? 'active' : ''} onClick={() => setDeckKind('static')}>Statik</button>
+            <button className={deckKind === 'llm' ? 'active' : ''} onClick={() => setDeckKind('llm')}>Yapay Zeka ile Üret</button>
+          </div>
+          <div className="deck-create-row">
+            <input value={newDeckName} onChange={(e) => setNewDeckName(e.target.value)} placeholder="Yeni deste adı, ör. Sınav Öncesi" />
+            <button className="button primary" onClick={createFlashcardDeck} disabled={!newDeckName.trim() || flashcardBusy}>
+              <Plus size={16} /> {activeJob?.type === 'flashcards' ? 'Oluşturuluyor…' : deckKind === 'llm' ? 'Yapay Zeka ile Oluştur' : 'Statik Deste Oluştur'}
+            </button>
+          </div>
+          {deckKind === 'static' ? (
+            <small className="health-hint">Mevcut anlatıdan anında, ücretsiz ve deterministik olarak üretilir — LLM çağrısı yapılmaz.</small>
+          ) : (
+            <div className="deck-llm-options">
+              <div className="provider-tabs compact">
+                {[['agent', 'Claude Agent'], ['gemini', 'Gemini API'], ['openai', 'OpenAI uyumlu']].map(([id, label]) => (
+                  <button key={id} className={llm.provider === id ? 'active' : ''} onClick={() => setLlm({ ...llm, provider: id })}>{label}</button>
+                ))}
+              </div>
+              <div className="form-grid">
+                {llm.provider === 'agent' && (
+                  <label className="field wide"><span>Agent komutu</span><input value={llm.agentCommand} onChange={(e) => setLlm({ ...llm, agentCommand: e.target.value })} /></label>
+                )}
+                {llm.provider === 'gemini' && <>
+                  <label className="field"><span>Model</span><select value={llm.geminiModel} onChange={(e) => setLlm({ ...llm, geminiModel: e.target.value })}>{bootstrap.models.gemini.map((model) => <option key={model}>{model}</option>)}</select></label>
+                  <label className="field"><span>API anahtarı {bootstrap.keysConfigured.gemini && <em>kayıtlı</em>}</span><input type="password" value={llm.apiKey} onChange={(e) => setLlm({ ...llm, apiKey: e.target.value })} placeholder="Yeni anahtar girmek zorunda değilsin" /></label>
+                </>}
+                {llm.provider === 'openai' && <>
+                  <label className="field wide"><span>Endpoint / Base URL</span><input value={llm.openaiEndpoint} onChange={(e) => setLlm({ ...llm, openaiEndpoint: e.target.value })} /></label>
+                  <label className="field"><span>Model kimliği</span><input value={llm.openaiModel} onChange={(e) => setLlm({ ...llm, openaiModel: e.target.value })} /></label>
+                  <label className="field"><span>API anahtarı {bootstrap.keysConfigured.openai && <em>kayıtlı</em>}</span><input type="password" value={llm.apiKey} onChange={(e) => setLlm({ ...llm, apiKey: e.target.value })} placeholder="sk-…" /></label>
+                </>}
+                <label className="field"><span>Kart sayısı</span><input type="number" min="1" max="60" value={deckCount} onChange={(e) => setDeckCount(e.target.value)} placeholder="Model karar versin" /></label>
+                <label className="field wide"><span>Odak / özel talimat (opsiyonel)</span><textarea rows="2" value={deckFocusPrompt} onChange={(e) => setDeckFocusPrompt(e.target.value)} placeholder="Örn. pointer'lara ve bellek yönetimine daha çok odaklan" /></label>
+              </div>
+              <ProgressStrip job={activeJob?.type === 'flashcards' || jobState?.kind === 'flashcards' ? jobState : null} />
+            </div>
+          )}
+          <div className="deck-list">
+            {flashcardBusy && flashcardDecks.length === 0 && <small className="health-hint">Yükleniyor…</small>}
+            {!flashcardBusy && flashcardDecks.length === 0 && (
+              <EmptyState icon={Layers3} title="Henüz deste yok">Yukarıdan ilk desteni oluştur.</EmptyState>
+            )}
+            {flashcardDecks.map((deck) => (
+              <div key={deck.id} className="deck-card" onClick={() => openFlashcardDeck(deck.id)}>
+                <Layers3 size={20} />
+                <span className="deck-card-main">
+                  <strong>{deck.name}</strong>
+                  <small>{deck.kind === 'llm' ? 'YZ destekli' : 'Statik'} · {deck.summary.totalCards} kart · {deck.summary.dueCount} bugün sırada</small>
+                </span>
+                <button className="icon-button danger" title="Desteyi sil" onClick={(e) => { e.stopPropagation(); deleteFlashcardDeck(deck.id) }}><Trash2 size={14} /></button>
+              </div>
+            ))}
+          </div>
+        </div>
+        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+      </div>
+    )
+  }
+
+  if (view === 'anki' && activeDeck) {
+    return (
+      <div className="dashboard-shell">
+        <AmbientBackdrop />
+        <button className="button quiet hub-back" onClick={reviewCard ? endReviewSession : closeFlashcardDeck}><ArrowLeft size={16} /> {reviewCard ? 'Desteye dön' : 'Destelere dön'}</button>
         {!reviewCard ? (
           <>
             <div className="dashboard-hero">
-              <span className="kicker">FLASHCARD ÇALIŞMA</span>
-              <h1>{project?.id}</h1>
-              <p>Aralıklı tekrar (SM-2 — Anki'nin de temel aldığı algoritma) ile çalış; kartlar ne kadar iyi hatırladığına göre otomatik programlanır. LLM çağrısı yok, tamamen ücretsiz ve anında.</p>
+              <span className="kicker">DESTE</span>
+              <h1>{activeDeck.name}</h1>
+              <p>Aralıklı tekrar (SM-2 — Anki'nin de temel aldığı algoritma) ile çalış; kartlar ne kadar iyi hatırladığına göre otomatik programlanır.</p>
             </div>
             <div className="anki-overview">
               <div className="anki-stats">
-                <div className="anki-stat"><strong>{flashcardSummary?.dueCount ?? 0}</strong><small>bugün sırada</small></div>
-                <div className="anki-stat"><strong>{flashcardSummary?.newCount ?? 0}</strong><small>yeni</small></div>
-                <div className="anki-stat"><strong>{flashcardSummary?.totalCards ?? 0}</strong><small>toplam kart</small></div>
-                <div className="anki-stat"><strong>{flashcardSummary?.suspendedCards ?? 0}</strong><small>askıda</small></div>
+                <div className="anki-stat"><strong>{activeDeck.summary?.dueCount ?? 0}</strong><small>bugün sırada</small></div>
+                <div className="anki-stat"><strong>{activeDeck.summary?.newCount ?? 0}</strong><small>yeni</small></div>
+                <div className="anki-stat"><strong>{activeDeck.summary?.totalCards ?? 0}</strong><small>toplam kart</small></div>
+                <div className="anki-stat"><strong>{activeDeck.summary?.suspendedCards ?? 0}</strong><small>askıda</small></div>
               </div>
               <div className="anki-actions">
-                <button className="button primary" onClick={startReviewSession} disabled={!flashcardSummary?.dueCount || flashcardBusy}>
-                  <WandSparkles size={16} /> Çalışmaya başla ({flashcardSummary?.dueCount ?? 0})
+                <button className="button primary" onClick={startReviewSession} disabled={!activeDeck.summary?.dueCount || flashcardBusy}>
+                  <WandSparkles size={16} /> Çalışmaya başla ({activeDeck.summary?.dueCount ?? 0})
                 </button>
-                <button className="button ghost" onClick={regenerateFlashcards} disabled={flashcardBusy}>
-                  <RefreshCw size={16} /> Kaynaktan yeniden oluştur
-                </button>
+                {activeDeck.kind === 'static' && (
+                  <button className="button ghost" onClick={regenerateActiveDeck} disabled={flashcardBusy}>
+                    <RefreshCw size={16} /> Kaynaktan yeniden oluştur
+                  </button>
+                )}
               </div>
               <div className="anki-card-list">
-                {flashcardBusy && flashcardDeck.length === 0 && <small className="health-hint">Yükleniyor…</small>}
-                {!flashcardBusy && flashcardDeck.length === 0 && (
-                  <EmptyState icon={Layers3} title="Henüz kart yok">Önce Video Üretimi'nden bir anlatı üretmen gerekiyor.</EmptyState>
-                )}
-                {flashcardDeck.map((card) => (
+                {activeDeck.cards.map((card) => (
                   <div key={card.id} className={`anki-card-row ${card.suspended ? 'suspended' : ''}`}>
                     <span className="anki-card-kind">{card.kind === 'cloze' ? 'Boşluk' : 'Temel'}</span>
                     <span className="anki-card-front">{card.front}</span>

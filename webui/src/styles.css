@@ -344,6 +344,20 @@ select { color-scheme: dark; }
 .hub-module-card.disabled { opacity: .45; cursor: not-allowed; }
 .hub-module-card.disabled:hover { transform: none; border-color: var(--line); }
 
+.provider-tabs.compact { padding: 0; }
+.deck-llm-options { display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.deck-llm-options .form-grid { padding: 0; }
+
+.deck-create-row { display: flex; gap: 8px; }
+.deck-create-row input { flex: 1; }
+.deck-list { display: grid; gap: 8px; max-height: 380px; overflow-y: auto; }
+.deck-card { display: flex; align-items: center; gap: 11px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); cursor: pointer; transition: .15s ease; }
+.deck-card:hover { border-color: rgba(121,239,189,.3); background: var(--surface-hover); }
+.deck-card > svg:first-child { color: var(--accent); flex: 0 0 auto; }
+.deck-card-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.deck-card-main strong { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.deck-card-main small { color: var(--muted); font-size: 8px; margin-top: 2px; }
+
 .anki-overview { display: flex; flex-direction: column; gap: 18px; max-width: 760px; margin: 0 auto; width: 100%; }
 .anki-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .anki-stat { padding: 14px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); text-align: center; display: grid; gap: 3px; }

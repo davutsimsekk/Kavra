@@ -54,7 +54,15 @@ from app.pipeline import (
 from app.chapters import export_all_chapters, identify_chapters, missing_render_indexes
 from app.cost_ledger import record as record_cost, summarize_all_projects, summarize_project
 from app.export import EXPORT_BUILDERS, write_export
-from app.flashcards import deck_summary, generate_deck, load_deck, save_deck
+from app.flashcards import (
+    create_deck,
+    deck_summary,
+    delete_deck,
+    get_deck,
+    list_decks,
+    regenerate_deck_cards,
+    update_card,
+)
 from app.quality_gate import load_or_analyze_quality
 from app.spaced_repetition import RATINGS, schedule_review
 from app.regenerate import apply_regeneration, resolve_source_sections
@@ -958,62 +966,180 @@ def export_study_material(project_id: str, kind: str):
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
-@app.get("/api/projects/{project_id}/flashcards")
-def get_flashcards(project_id: str):
-    """Var olan desteyi döndürür; hiç üretilmemişse (ve slayt varsa) otomatik üretir.
+def _deck_payload(deck: dict) -> dict:
+    return {**deck, "summary": deck_summary(deck["cards"])}
 
-    LLM çağrısı yok — app/flashcards.py tamamen deterministik, anında ve ücretsiz.
+
+@app.get("/api/projects/{project_id}/flashcards/decks")
+def list_flashcard_decks(project_id: str):
+    """Bu projedeki tüm desteleri (kartlarıyla birlikte) listeler.
+
+    Gerçek Anki'deki gibi bir projede birden fazla deste olabilir — hiçbiri
+    otomatik oluşturulmaz, kullanıcı "Yeni Deste" ile kendi açar (bkz.
+    create_deck). Bu, ileride eklenecek YZ ile üretim seçeneğinin de aynı
+    listeye "kind": "llm" olarak sorunsuz oturmasını sağlıyor.
     """
     pdir = _project_dir(project_id)
+    return {"decks": [_deck_payload(d) for d in list_decks(pdir)]}
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks")
+def create_flashcard_deck(project_id: str, payload: dict = Body(...)):
+    pdir = _project_dir(project_id)
     slides = _slides_or_empty(pdir)
-    deck = load_deck(pdir)
-    if not deck and slides:
-        deck = generate_deck(slides)
-        save_deck(pdir, deck)
-    return {"deck": deck, "summary": deck_summary(deck)}
+    if not slides:
+        raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
+    name = str(payload.get("name", "")).strip()
+    kind = str(payload.get("kind", "static"))
+
+    if kind == "static":
+        try:
+            deck = create_deck(pdir, name, kind, slides)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return _deck_payload(deck)
+
+    if kind != "llm":
+        raise HTTPException(400, f"Bilinmeyen deste türü: {kind!r}")
+
+    provider_name = str(payload.get("provider", "agent"))
+    focus_prompt = str(payload.get("focusPrompt", "")).strip()
+    raw_count = payload.get("count")
+    try:
+        count = int(raw_count) if raw_count not in (None, "") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Kart sayısı sayısal olmalı.")
+    if count is not None and not (1 <= count <= 60):
+        raise HTTPException(400, "Kart sayısı 1 ile 60 arasında olmalı.")
+
+    api_key = str(payload.get("apiKey", "")).strip()
+    if api_key and provider_name == "gemini":
+        save_api_key("GEMINI_API_KEY", api_key)
+    elif api_key and provider_name == "openai":
+        save_api_key("OPENAI_API_KEY", api_key)
+
+    settings = load_settings()
+
+    def work(job_id: str):
+        if provider_name == "agent":
+            from app.llm.agent_cli_provider import AgentCliNarrationGenerator
+
+            generator = AgentCliNarrationGenerator(
+                command=str(payload.get("agentCommand", settings["agent_command"])),
+                timeout=max(60, int(payload.get("timeout", 300))),
+                reuse_session=False,
+            )
+        elif provider_name == "gemini":
+            from app.llm.gemini_provider import GeminiNarrationGenerator
+
+            generator = GeminiNarrationGenerator(
+                model=str(payload.get("geminiModel", settings["gemini_model"])),
+                api_key=api_key or None,
+            )
+        elif provider_name == "openai":
+            from app.llm.openai_compatible_provider import OpenAICompatibleNarrationGenerator
+
+            generator = OpenAICompatibleNarrationGenerator(
+                endpoint=str(payload.get("openaiEndpoint", settings["openai_endpoint"])),
+                model=str(payload.get("openaiModel", settings["openai_model"])),
+                api_key=api_key or None,
+                timeout=max(60, int(payload.get("timeout", 300))),
+            )
+        else:
+            raise ValueError("Bilinmeyen LLM sağlayıcısı.")
+
+        try:
+            deck = create_deck(
+                pdir, name, "llm", slides,
+                generator=generator, count=count, focus_prompt=focus_prompt,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        card_words = sum(len(c["front"].split()) + len(c["back"].split()) for c in deck["cards"])
+        if provider_name == "agent":
+            record_cost(pdir, provider="agent", kind="flashcards",
+                        usd=generator.total_cost_usd, words=card_words)
+        else:
+            record_cost(pdir, provider=provider_name, kind="flashcards", words=card_words)
+        return {"deck": _deck_payload(deck)}
+
+    return {"jobId": jobs.create("flashcards", work)}
 
 
-@app.post("/api/projects/{project_id}/flashcards/generate")
-def regenerate_flashcards(project_id: str):
-    """Desteyi güncel slaytlardan yeniden üretir; İÇERİĞİ DEĞİŞMEMİŞ kartların
-    aralıklı tekrar ilerlemesi (ease/interval/due) korunur — sadece değişen/
-    silinen slaytların kartları düşer, yenileri taze eklenir.
+@app.get("/api/projects/{project_id}/flashcards/decks/{deck_id}")
+def get_flashcard_deck(project_id: str, deck_id: str):
+    pdir = _project_dir(project_id)
+    deck = get_deck(pdir, deck_id)
+    if deck is None:
+        raise HTTPException(404, "Deste bulunamadı.")
+    return _deck_payload(deck)
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/generate")
+def regenerate_flashcard_deck(project_id: str, deck_id: str):
+    """Bu destenin kartlarını güncel slaytlardan yeniden üretir; İÇERİĞİ
+    DEĞİŞMEMİŞ kartların aralıklı tekrar ilerlemesi (ease/interval/due)
+    korunur — sadece değişen/silinen slaytların kartları düşer, yenileri
+    taze eklenir. Diğer desteler etkilenmez.
     """
     pdir = _project_dir(project_id)
     slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
-    existing = load_deck(pdir)
-    deck = generate_deck(slides, existing_cards=existing)
-    save_deck(pdir, deck)
-    return {"deck": deck, "summary": deck_summary(deck)}
+    try:
+        deck = regenerate_deck_cards(pdir, deck_id, slides)
+    except KeyError as exc:
+        raise HTTPException(404, "Deste bulunamadı.") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return _deck_payload(deck)
 
 
-@app.post("/api/projects/{project_id}/flashcards/{card_id}/review")
-def review_flashcard(project_id: str, card_id: str, payload: dict = Body(...)):
+@app.delete("/api/projects/{project_id}/flashcards/decks/{deck_id}")
+def delete_flashcard_deck(project_id: str, deck_id: str):
+    pdir = _project_dir(project_id)
+    try:
+        delete_deck(pdir, deck_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Deste bulunamadı.") from exc
+    return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/review")
+def review_flashcard(project_id: str, deck_id: str, card_id: str, payload: dict = Body(...)):
     rating = str(payload.get("rating", ""))
     if rating not in RATINGS:
         raise HTTPException(400, f"Geçersiz değerlendirme; beklenen: {', '.join(RATINGS)}")
     pdir = _project_dir(project_id)
-    deck = load_deck(pdir)
-    card = next((c for c in deck if c["id"] == card_id), None)
+    deck = get_deck(pdir, deck_id)
+    if deck is None:
+        raise HTTPException(404, "Deste bulunamadı.")
+    card = next((c for c in deck["cards"] if c["id"] == card_id), None)
     if card is None:
         raise HTTPException(404, "Kart bulunamadı.")
-    card.update(schedule_review(card, rating))
-    save_deck(pdir, deck)
-    return {"card": card, "summary": deck_summary(deck)}
+    try:
+        card = update_card(pdir, deck_id, card_id, schedule_review(card, rating))
+    except KeyError as exc:
+        raise HTTPException(404, "Kart bulunamadı.") from exc
+    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
 
 
-@app.post("/api/projects/{project_id}/flashcards/{card_id}/suspend")
-def toggle_flashcard_suspend(project_id: str, card_id: str, payload: dict = Body(...)):
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/suspend")
+def toggle_flashcard_suspend(project_id: str, deck_id: str, card_id: str, payload: dict = Body(...)):
     pdir = _project_dir(project_id)
-    deck = load_deck(pdir)
-    card = next((c for c in deck if c["id"] == card_id), None)
+    deck = get_deck(pdir, deck_id)
+    if deck is None:
+        raise HTTPException(404, "Deste bulunamadı.")
+    card = next((c for c in deck["cards"] if c["id"] == card_id), None)
     if card is None:
         raise HTTPException(404, "Kart bulunamadı.")
-    card["suspended"] = bool(payload.get("suspended", not card.get("suspended", False)))
-    save_deck(pdir, deck)
-    return {"card": card, "summary": deck_summary(deck)}
+    suspended = bool(payload.get("suspended", not card.get("suspended", False)))
+    try:
+        card = update_card(pdir, deck_id, card_id, {"suspended": suspended})
+    except KeyError as exc:
+        raise HTTPException(404, "Kart bulunamadı.") from exc
+    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
 
 
 @app.get("/api/projects/{project_id}/chapters")
