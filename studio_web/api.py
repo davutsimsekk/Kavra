@@ -54,7 +54,9 @@ from app.pipeline import (
 from app.chapters import export_all_chapters, identify_chapters, missing_render_indexes
 from app.cost_ledger import record as record_cost, summarize_all_projects, summarize_project
 from app.export import EXPORT_BUILDERS, write_export
+from app.flashcards import deck_summary, generate_deck, load_deck, save_deck
 from app.quality_gate import load_or_analyze_quality
+from app.spaced_repetition import RATINGS, schedule_review
 from app.regenerate import apply_regeneration, resolve_source_sections
 from app.render_estimate import estimate_render
 from app.tts.pronunciation import (
@@ -954,6 +956,64 @@ def export_study_material(project_id: str, kind: str):
     filename, media_type, _builder = EXPORT_BUILDERS[kind]
     path = write_export(pdir, kind, slides)
     return FileResponse(path, media_type=media_type, filename=filename)
+
+
+@app.get("/api/projects/{project_id}/flashcards")
+def get_flashcards(project_id: str):
+    """Var olan desteyi döndürür; hiç üretilmemişse (ve slayt varsa) otomatik üretir.
+
+    LLM çağrısı yok — app/flashcards.py tamamen deterministik, anında ve ücretsiz.
+    """
+    pdir = _project_dir(project_id)
+    slides = _slides_or_empty(pdir)
+    deck = load_deck(pdir)
+    if not deck and slides:
+        deck = generate_deck(slides)
+        save_deck(pdir, deck)
+    return {"deck": deck, "summary": deck_summary(deck)}
+
+
+@app.post("/api/projects/{project_id}/flashcards/generate")
+def regenerate_flashcards(project_id: str):
+    """Desteyi güncel slaytlardan yeniden üretir; İÇERİĞİ DEĞİŞMEMİŞ kartların
+    aralıklı tekrar ilerlemesi (ease/interval/due) korunur — sadece değişen/
+    silinen slaytların kartları düşer, yenileri taze eklenir.
+    """
+    pdir = _project_dir(project_id)
+    slides = _slides_or_empty(pdir)
+    if not slides:
+        raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
+    existing = load_deck(pdir)
+    deck = generate_deck(slides, existing_cards=existing)
+    save_deck(pdir, deck)
+    return {"deck": deck, "summary": deck_summary(deck)}
+
+
+@app.post("/api/projects/{project_id}/flashcards/{card_id}/review")
+def review_flashcard(project_id: str, card_id: str, payload: dict = Body(...)):
+    rating = str(payload.get("rating", ""))
+    if rating not in RATINGS:
+        raise HTTPException(400, f"Geçersiz değerlendirme; beklenen: {', '.join(RATINGS)}")
+    pdir = _project_dir(project_id)
+    deck = load_deck(pdir)
+    card = next((c for c in deck if c["id"] == card_id), None)
+    if card is None:
+        raise HTTPException(404, "Kart bulunamadı.")
+    card.update(schedule_review(card, rating))
+    save_deck(pdir, deck)
+    return {"card": card, "summary": deck_summary(deck)}
+
+
+@app.post("/api/projects/{project_id}/flashcards/{card_id}/suspend")
+def toggle_flashcard_suspend(project_id: str, card_id: str, payload: dict = Body(...)):
+    pdir = _project_dir(project_id)
+    deck = load_deck(pdir)
+    card = next((c for c in deck if c["id"] == card_id), None)
+    if card is None:
+        raise HTTPException(404, "Kart bulunamadı.")
+    card["suspended"] = bool(payload.get("suspended", not card.get("suspended", False)))
+    save_deck(pdir, deck)
+    return {"card": card, "summary": deck_summary(deck)}
 
 
 @app.get("/api/projects/{project_id}/chapters")

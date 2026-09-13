@@ -590,5 +590,103 @@ class GenerateEndpointDiagramExtractionTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
 
 
+class FlashcardEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="http://localhost")
+
+    @staticmethod
+    def _slide():
+        return Slide(title="Kesmeler", narration="Kesmeler hakkında anlatım.", bullets=["İşlemci kesme isteği alır"])
+
+    def test_get_auto_generates_deck_when_none_exists_yet(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.get(f"/api/projects/{pdir.name}/flashcards")
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertGreater(len(data["deck"]), 0)
+            self.assertEqual(data["summary"]["totalCards"], len(data["deck"]))
+            self.assertTrue((pdir / "flashcards.json").exists())
+
+    def test_get_without_slides_returns_empty_deck_not_an_error(self):
+        with _temp_project([]) as pdir:
+            response = self.client.get(f"/api/projects/{pdir.name}/flashcards")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["deck"], [])
+
+    def test_regenerate_requires_slides(self):
+        with _temp_project([]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/generate",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_regenerate_preserves_progress_for_unchanged_cards(self):
+        with _temp_project([self._slide()]) as pdir:
+            first = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
+            card_id = first["deck"][0]["id"]
+            self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/{card_id}/review",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
+            )
+
+            regenerated = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/generate",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            ).json()
+
+            card = next(c for c in regenerated["deck"] if c["id"] == card_id)
+            self.assertEqual(card["repetitions"], 1)
+
+    def test_review_applies_sm2_scheduling_and_persists(self):
+        with _temp_project([self._slide()]) as pdir:
+            data = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
+            card_id = data["deck"][0]["id"]
+
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/{card_id}/review",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["card"]["repetitions"], 1)
+
+            reloaded = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
+            reloaded_card = next(c for c in reloaded["deck"] if c["id"] == card_id)
+            self.assertEqual(reloaded_card["repetitions"], 1)
+
+    def test_review_rejects_unknown_rating(self):
+        with _temp_project([self._slide()]) as pdir:
+            data = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
+            card_id = data["deck"][0]["id"]
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/{card_id}/review",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "excellent"},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_review_unknown_card_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            self.client.get(f"/api/projects/{pdir.name}/flashcards")
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/does-not-exist/review",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_suspend_toggles_and_excludes_from_due_count(self):
+        with _temp_project([self._slide()]) as pdir:
+            data = self.client.get(f"/api/projects/{pdir.name}/flashcards").json()
+            card_id = data["deck"][0]["id"]
+            due_before = data["summary"]["dueCount"]
+
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/{card_id}/suspend",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"suspended": True},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["summary"]["dueCount"], due_before - 1)
+            self.assertTrue(response.json()["card"]["suspended"])
+
+
 if __name__ == "__main__":
     unittest.main()

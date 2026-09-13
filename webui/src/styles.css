@@ -344,6 +344,34 @@ select { color-scheme: dark; }
 .hub-module-card.disabled { opacity: .45; cursor: not-allowed; }
 .hub-module-card.disabled:hover { transform: none; border-color: var(--line); }
 
+.anki-overview { display: flex; flex-direction: column; gap: 18px; max-width: 760px; margin: 0 auto; width: 100%; }
+.anki-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.anki-stat { padding: 14px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); text-align: center; display: grid; gap: 3px; }
+.anki-stat strong { font-size: 20px; }
+.anki-stat small { color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: .05em; }
+.anki-actions { display: flex; gap: 10px; justify-content: center; }
+.anki-card-list { display: grid; gap: 6px; max-height: 340px; overflow-y: auto; }
+.anki-card-row { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); font-size: 9px; }
+.anki-card-row.suspended { opacity: .5; }
+.anki-card-kind { color: var(--accent); font-size: 7px; text-transform: uppercase; letter-spacing: .05em; padding: 3px 7px; border-radius: 10px; background: rgba(121,239,189,.08); white-space: nowrap; }
+.anki-card-front { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.anki-card-row > small { color: var(--muted); white-space: nowrap; }
+
+.review-session { display: flex; flex-direction: column; align-items: center; gap: 18px; max-width: 640px; margin: auto; width: 100%; }
+.review-progress { color: var(--muted); font-size: 9px; }
+.review-card { width: 100%; min-height: 220px; padding: 34px 30px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: linear-gradient(145deg, rgba(22,35,31,.93), rgba(13,23,20,.91)); box-shadow: var(--shadow); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; }
+.review-card-kind { color: var(--accent); font-size: 8px; text-transform: uppercase; letter-spacing: .08em; }
+.review-front { font-size: 17px; line-height: 1.5; margin: 0; white-space: pre-wrap; }
+.review-card hr { width: 60%; border: none; border-top: 1px solid var(--line); margin: 0; }
+.review-back { font-size: 15px; color: var(--muted); line-height: 1.5; margin: 0; white-space: pre-wrap; }
+.review-reveal { min-width: 220px; min-height: 44px; }
+.review-ratings { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; width: 100%; }
+.review-ratings button { min-height: 44px; font-weight: 650; }
+.rating-again { background: rgba(255,127,131,.12); border-color: rgba(255,127,131,.3); color: #ffb1b3; }
+.rating-hard { background: rgba(255,191,122,.12); border-color: rgba(255,191,122,.3); color: #ffbf7a; }
+.rating-good { background: rgba(121,239,189,.12); border-color: rgba(121,239,189,.3); color: var(--accent); }
+.rating-easy { background: rgba(146,153,255,.12); border-color: rgba(146,153,255,.3); color: var(--violet); }
+
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #30423b; border-radius: 10px; }

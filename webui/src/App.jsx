@@ -179,6 +179,13 @@ export default function App() {
   const [queueItems, setQueueItems] = useState([])
   const [queuePath, setQueuePath] = useState('')
   const [queueBusy, setQueueBusy] = useState(false)
+  const [flashcardDeck, setFlashcardDeck] = useState([])
+  const [flashcardSummary, setFlashcardSummary] = useState(null)
+  const [flashcardBusy, setFlashcardBusy] = useState(false)
+  const [reviewQueue, setReviewQueue] = useState([])
+  const [reviewCard, setReviewCard] = useState(null)
+  const [reviewRevealed, setReviewRevealed] = useState(false)
+  const [reviewedCount, setReviewedCount] = useState(0)
   const [pronunciationEntries, setPronunciationEntries] = useState([])
   const [newTerm, setNewTerm] = useState('')
   const [newPhonetic, setNewPhonetic] = useState('')
@@ -406,6 +413,11 @@ export default function App() {
     if (showCost) api('/api/cost-summary').then(setCostSummary).catch(() => {})
   }, [showCost])
 
+  useEffect(() => {
+    if (view === 'anki' && project) loadFlashcards()
+    if (view !== 'anki') endReviewSession()
+  }, [view, project?.id])
+
   const addToQueue = async () => {
     if (!queuePath.trim()) return
     setQueueBusy(true)
@@ -437,6 +449,88 @@ export default function App() {
     try {
       await api(`/api/queue/${id}`, { method: 'DELETE' })
       refreshQueue()
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const loadFlashcards = async () => {
+    if (!project) return
+    setFlashcardBusy(true)
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards`)
+      setFlashcardDeck(data.deck)
+      setFlashcardSummary(data.summary)
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setFlashcardBusy(false)
+    }
+  }
+
+  const regenerateFlashcards = async () => {
+    if (!project) return
+    setFlashcardBusy(true)
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/generate`, { method: 'POST' })
+      setFlashcardDeck(data.deck)
+      setFlashcardSummary(data.summary)
+      setToast({ type: 'success', text: 'Deste güncel slaytlardan yeniden oluşturuldu.' })
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setFlashcardBusy(false)
+    }
+  }
+
+  const startReviewSession = () => {
+    const now = Date.now() / 1000
+    const due = flashcardDeck
+      .filter((c) => !c.suspended && c.dueAt <= now)
+      .sort((a, b) => a.dueAt - b.dueAt)
+    if (!due.length) return
+    setReviewQueue(due.slice(1))
+    setReviewCard(due[0])
+    setReviewRevealed(false)
+    setReviewedCount(0)
+  }
+
+  const endReviewSession = () => {
+    setReviewQueue([])
+    setReviewCard(null)
+    setReviewRevealed(false)
+  }
+
+  const submitReviewRating = async (rating) => {
+    if (!project || !reviewCard) return
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/${reviewCard.id}/review`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }),
+      })
+      setFlashcardDeck((current) => current.map((c) => (c.id === data.card.id ? data.card : c)))
+      setFlashcardSummary(data.summary)
+      setReviewedCount((count) => count + 1)
+      if (reviewQueue.length) {
+        setReviewCard(reviewQueue[0])
+        setReviewQueue(reviewQueue.slice(1))
+        setReviewRevealed(false)
+      } else {
+        endReviewSession()
+      }
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const toggleCardSuspend = async (card) => {
+    if (!project) return
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/${card.id}/suspend`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ suspended: !card.suspended }),
+      })
+      setFlashcardDeck((current) => current.map((c) => (c.id === data.card.id ? data.card : c)))
+      setFlashcardSummary(data.summary)
     } catch (error) {
       setToast({ type: 'error', text: error.message })
     }
@@ -1218,12 +1312,83 @@ export default function App() {
             <small>{project?.outputs?.video ? 'Video hazır — düzenlemeye devam et' : project?.slides.length ? 'Anlatı hazır, render bekliyor' : 'Henüz başlanmadı'}</small>
             <div className="mini-progress"><span style={{ width: `${hubCompletion}%` }} /></div>
           </button>
-          <button className="hub-module-card disabled" disabled title="Yakında">
+          <button className="hub-module-card" onClick={() => setView('anki')} disabled={!project?.slides.length}>
             <Layers3 size={30} />
             <strong>Flashcard Çalışma</strong>
-            <small>Yakında — kaynaktan akıllı kartlar üretip burada çalışabileceksin</small>
+            <small>{project?.slides.length ? 'Kaynaktan üretilen kartlarla aralıklı tekrar yap' : 'Önce Video Üretimi\'nden bir anlatı üret'}</small>
           </button>
         </div>
+        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+      </div>
+    )
+  }
+
+  if (view === 'anki') {
+    return (
+      <div className="dashboard-shell">
+        <AmbientBackdrop />
+        <button className="button quiet hub-back" onClick={() => setView('hub')}><ArrowLeft size={16} /> Panele dön</button>
+        {!reviewCard ? (
+          <>
+            <div className="dashboard-hero">
+              <span className="kicker">FLASHCARD ÇALIŞMA</span>
+              <h1>{project?.id}</h1>
+              <p>Aralıklı tekrar (SM-2 — Anki'nin de temel aldığı algoritma) ile çalış; kartlar ne kadar iyi hatırladığına göre otomatik programlanır. LLM çağrısı yok, tamamen ücretsiz ve anında.</p>
+            </div>
+            <div className="anki-overview">
+              <div className="anki-stats">
+                <div className="anki-stat"><strong>{flashcardSummary?.dueCount ?? 0}</strong><small>bugün sırada</small></div>
+                <div className="anki-stat"><strong>{flashcardSummary?.newCount ?? 0}</strong><small>yeni</small></div>
+                <div className="anki-stat"><strong>{flashcardSummary?.totalCards ?? 0}</strong><small>toplam kart</small></div>
+                <div className="anki-stat"><strong>{flashcardSummary?.suspendedCards ?? 0}</strong><small>askıda</small></div>
+              </div>
+              <div className="anki-actions">
+                <button className="button primary" onClick={startReviewSession} disabled={!flashcardSummary?.dueCount || flashcardBusy}>
+                  <WandSparkles size={16} /> Çalışmaya başla ({flashcardSummary?.dueCount ?? 0})
+                </button>
+                <button className="button ghost" onClick={regenerateFlashcards} disabled={flashcardBusy}>
+                  <RefreshCw size={16} /> Kaynaktan yeniden oluştur
+                </button>
+              </div>
+              <div className="anki-card-list">
+                {flashcardBusy && flashcardDeck.length === 0 && <small className="health-hint">Yükleniyor…</small>}
+                {!flashcardBusy && flashcardDeck.length === 0 && (
+                  <EmptyState icon={Layers3} title="Henüz kart yok">Önce Video Üretimi'nden bir anlatı üretmen gerekiyor.</EmptyState>
+                )}
+                {flashcardDeck.map((card) => (
+                  <div key={card.id} className={`anki-card-row ${card.suspended ? 'suspended' : ''}`}>
+                    <span className="anki-card-kind">{card.kind === 'cloze' ? 'Boşluk' : 'Temel'}</span>
+                    <span className="anki-card-front">{card.front}</span>
+                    <small>{card.repetitions === 0 ? 'yeni' : `${card.repetitions} tekrar`}</small>
+                    <button className="button quiet compact" onClick={() => toggleCardSuspend(card)}>
+                      {card.suspended ? 'Aktif et' : 'Askıya al'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="review-session">
+            <div className="review-progress"><small>{reviewedCount} incelendi · {reviewQueue.length + 1} kart kaldı</small></div>
+            <div className="review-card">
+              <span className="review-card-kind">{reviewCard.kind === 'cloze' ? 'Boşluk Doldurma' : 'Temel Kart'}</span>
+              <p className="review-front">{reviewCard.front}</p>
+              {reviewRevealed && <><hr /><p className="review-back">{reviewCard.back}</p></>}
+            </div>
+            {!reviewRevealed ? (
+              <button className="button primary review-reveal" onClick={() => setReviewRevealed(true)}>Cevabı Göster</button>
+            ) : (
+              <div className="review-ratings">
+                <button className="button rating-again" onClick={() => submitReviewRating('again')}>Tekrar</button>
+                <button className="button rating-hard" onClick={() => submitReviewRating('hard')}>Zor</button>
+                <button className="button rating-good" onClick={() => submitReviewRating('good')}>İyi</button>
+                <button className="button rating-easy" onClick={() => submitReviewRating('easy')}>Kolay</button>
+              </div>
+            )}
+            <button className="button quiet" onClick={endReviewSession}>Oturumu bitir</button>
+          </div>
+        )}
         {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
       </div>
     )
