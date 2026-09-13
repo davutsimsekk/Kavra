@@ -274,6 +274,25 @@ def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
         code_x = code_area[0] + (code_area[2] - code_area[0] - code_img.width) // 2
         code_y = code_area[1] + (code_area[3] - code_area[1] - code_img.height) // 2
         img.paste(code_img, (code_x, code_y))
+    elif slide.embedded_image and Path(slide.embedded_image).exists():
+        # "Diyagram/görsel çıkar" modu: kod örneğiyle aynı ikiye-bölünmüş
+        # düzen, sağ tarafta kaynaktan çıkarılmış GERÇEK görsel var.
+        divider_x = int(width * 0.49)
+        draw.line(
+            (divider_x, content_top + 42, divider_x, content_bottom - 42),
+            fill=theme.border, width=2,
+        )
+        _draw_bullet_cards(
+            draw, slide.bullets,
+            (106, content_top + 72, divider_x - 34, content_bottom - 34),
+            theme, compact=True,
+        )
+        draw.text(
+            (divider_x + 40, content_top + 30), "KAYNAK GÖRSEL",
+            font=label_font, fill=theme.accent,
+        )
+        image_area = (divider_x + 40, content_top + 76, width - 112, content_bottom - 36)
+        _paste_fitted_image(img, slide.embedded_image, image_area)
     else:
         draw.text(
             (112, content_top + 30), "ANA FİKİRLER",
@@ -288,10 +307,54 @@ def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
     _draw_progress(draw, theme, index, total, width, height)
 
 
+def _render_source_page(image_path: str, out_path: Path, width: int, height: int):
+    """"Sayfaları birebir slayt olarak kullan" modu: kaynak sayfa görüntüsünü
+    olduğu gibi kullan, kendi temamızı/başlık-madde çizimimizi hiç yapma.
+
+    Sayfa oranı genelde 16:9 değildir (A4, 4:3 sunu vb.) — kırpmadan, siyah
+    kenar boşluğuyla (letterbox/pillarbox) tam kareye ortalanmış sığdırıyoruz.
+    """
+    with Image.open(image_path) as source:
+        page = source.convert("RGB")
+    page_ratio = page.width / page.height
+    frame_ratio = width / height
+    if page_ratio > frame_ratio:
+        new_width, new_height = width, round(width / page_ratio)
+    else:
+        new_height, new_width = height, round(height * page_ratio)
+    resized = page.resize((max(new_width, 1), max(new_height, 1)), Image.LANCZOS)
+    frame = Image.new("RGB", (width, height), (0, 0, 0))
+    frame.paste(resized, ((width - new_width) // 2, (height - new_height) // 2))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    frame.save(out_path, quality=95)
+
+
+def _paste_fitted_image(img: Image.Image, image_path: str, area: tuple[int, int, int, int]):
+    """"Diyagram/görsel çıkar" modu: kaynaktan çıkarılmış GERÇEK görseli, oranını
+    koruyarak (kırpmadan) verilen alana ortalanmış sığdırıp yapıştırır. Görselin
+    kendisi hiç değiştirilmiyor/yeniden çizilmiyor — sadece boyutlandırılıyor.
+    """
+    x1, y1, x2, y2 = area
+    box_w, box_h = x2 - x1, y2 - y1
+    if box_w <= 0 or box_h <= 0:
+        return
+    with Image.open(image_path) as source:
+        picture = source.convert("RGB")
+    ratio = min(box_w / picture.width, box_h / picture.height)
+    new_w = max(int(picture.width * ratio), 1)
+    new_h = max(int(picture.height * ratio), 1)
+    resized = picture.resize((new_w, new_h), Image.LANCZOS)
+    img.paste(resized, (x1 + (box_w - new_w) // 2, y1 + (box_h - new_h) // 2))
+
+
 def render_slide(slide: Slide, index: int, total: int, breadcrumb: str,
                  out_path: Path, width: int = 1920, height: int = 1080,
                  accent: tuple[int, int, int] | None = None,
                  theme_preset: str = "auto"):
+    if slide.background_image and Path(slide.background_image).exists():
+        _render_source_page(slide.background_image, out_path, width, height)
+        return
+
     theme = resolve_theme(theme_preset, slide, index)
     if accent:
         theme = ThemePreset(**{**theme.__dict__, "accent": accent})

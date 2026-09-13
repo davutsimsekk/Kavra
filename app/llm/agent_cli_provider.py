@@ -46,14 +46,7 @@ class AgentCliNarrationGenerator(NarrationGenerator):
         self.session_id = str(uuid.uuid4())
         return [*cmd, "--session-id", self.session_id]
 
-    def generate(self, sections: list[RawSection], style_note: str = "") -> list[Slide]:
-        prompt = build_prompt(sections, style_note)
-        if self._manages_claude_session() and self.session_id:
-            prompt = (
-                "Bu, aynı ders scriptinin bir sonraki içerik parçasıdır. Önceki yanıttaki "
-                "terminolojiyi ve anlatım akışını koru; önceki slaytları tekrarlama. "
-                "Yalnızca aşağıdaki yeni içerik için JSON dizisi üret.\n\n" + prompt
-            )
+    def _call(self, prompt: str) -> str:
         cmd = self._command_for_next_call()
         try:
             proc = subprocess.run(
@@ -87,6 +80,27 @@ class AgentCliNarrationGenerator(NarrationGenerator):
                 out = envelope["result"]
         except json.JSONDecodeError:
             pass
+        return out
 
-        data = extract_json_array(out)
+    def generate(self, sections: list[RawSection], style_note: str = "") -> list[Slide]:
+        prompt = build_prompt(sections, style_note)
+        if self._manages_claude_session() and self.session_id:
+            prompt = (
+                "Bu, aynı ders scriptinin bir sonraki içerik parçasıdır. Önceki yanıttaki "
+                "terminolojiyi ve anlatım akışını koru; önceki slaytları tekrarlama. "
+                "Yalnızca aşağıdaki yeni içerik için JSON dizisi üret.\n\n" + prompt
+            )
+        out = self._call(prompt)
+        try:
+            data = extract_json_array(out)
+        except (ValueError, TypeError):
+            # Model bazen dizinin ortasında geçersiz bir kaçış/virgül bırakabiliyor
+            # (ör. kod örneğindeki tırnak/yeni satır). Gemini/OpenAI sağlayıcılarındaki
+            # gibi, bozuk çıktıyı modelin kendisine gösterip düzelttiriyoruz.
+            fix_prompt = (
+                "Aşağıdaki metni SADECE geçerli bir JSON dizisine çevir, "
+                "başka hiçbir şey yazma:\n\n" + out
+            )
+            out = self._call(fix_prompt)
+            data = extract_json_array(out)
         return [Slide.from_dict(d) for d in data]

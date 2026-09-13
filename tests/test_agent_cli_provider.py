@@ -57,6 +57,164 @@ class ChunkingTests(unittest.TestCase):
         self.assertIn("Çıktı Bir", generator.notes[1])
         self.assertIn("önceki slaytları tekrar üretme", generator.notes[1])
 
+    def test_duration_budget_is_proportional_to_section_share(self):
+        class RecordingGenerator(NarrationGenerator):
+            def __init__(self):
+                self.notes = []
+
+            def generate(self, sections, style_note=""):
+                self.notes.append(style_note)
+                return [Slide(title=sections[0].title)]
+
+        generator = RecordingGenerator()
+        # Başlıklar boş bırakılıyor ki ağırlık hesabı (_section_weight) sadece
+        # gövde metninden gelsin ve pay tam olarak %75/%25 çıksın.
+        long_section = RawSection("", "", "x" * 300)
+        short_section = RawSection("", "", "y" * 100)
+
+        generator.generate_chunked(
+            [long_section, short_section],
+            max_sections_per_chunk=1,
+            request_interval_sec=0,
+            continuity_context=False,
+            target_duration_minutes=60,
+        )
+
+        self.assertIn("SÜRE HEDEFİ MODU AKTİF", generator.notes[0])
+        self.assertIn("%75", generator.notes[0])
+        self.assertIn("45.0 dakika", generator.notes[0])
+        self.assertIn("%25", generator.notes[1])
+        self.assertIn("15.0 dakika", generator.notes[1])
+
+    def test_duration_budget_note_is_absent_by_default(self):
+        class RecordingGenerator(NarrationGenerator):
+            def __init__(self):
+                self.notes = []
+
+            def generate(self, sections, style_note=""):
+                self.notes.append(style_note)
+                return [Slide(title=sections[0].title)]
+
+        generator = RecordingGenerator()
+        generator.generate_chunked(
+            [RawSection("", "Konu", "içerik")],
+            "Üslup notu",
+            request_interval_sec=0,
+            continuity_context=False,
+        )
+
+        self.assertEqual(generator.notes[0], "Üslup notu")
+        self.assertNotIn("SÜRE HEDEFİ", generator.notes[0])
+
+
+class ContinuityFullTextTests(unittest.TestCase):
+    def test_last_slides_full_narration_is_included_for_stateless_providers(self):
+        from app.llm.base import build_continuity_context
+
+        slides = [
+            Slide(title="Eski", narration="Bu çok eski bir slayt, tam metni görünmemeli."),
+            Slide(title="Az önceki", narration="Bu az önceki slaydın tam anlatım metni burada."),
+            Slide(title="Son", narration="Bu en son üretilen slaydın tam anlatım metni."),
+        ]
+
+        note = build_continuity_context(slides, full_text_recent=2)
+
+        self.assertIn("Bu az önceki slaydın tam anlatım metni burada.", note)
+        self.assertIn("Bu en son üretilen slaydın tam anlatım metni.", note)
+        self.assertNotIn("Bu çok eski bir slayt, tam metni görünmemeli.", note)
+        self.assertIn("BİREBİR TEKRAR ÜRETME", note)
+
+    def test_full_narration_is_truncated_to_bound_cost(self):
+        from app.llm.base import build_continuity_context
+
+        long_narration = "kelime " * 300  # kasıtlı olarak çok uzun
+        slides = [Slide(title="Uzun", narration=long_narration)]
+
+        note = build_continuity_context(slides, full_text_recent=1, full_text_max_chars=50)
+
+        self.assertIn("…", note)
+        self.assertLess(len(note), len(long_narration))
+
+
+class SingleSlidePerSectionTests(unittest.TestCase):
+    def test_single_slide_note_is_injected_when_enabled(self):
+        class RecordingGenerator(NarrationGenerator):
+            def __init__(self):
+                self.notes = []
+
+            def generate(self, sections, style_note=""):
+                self.notes.append(style_note)
+                return [Slide(title=sections[0].title)]
+
+        generator = RecordingGenerator()
+        generator.generate_chunked(
+            [RawSection("", "Sayfa 1", "içerik")],
+            request_interval_sec=0, continuity_context=False,
+            single_slide_per_section=True,
+        )
+
+        self.assertIn("SAYFA MODU AKTİF", generator.notes[0])
+        self.assertIn("TAM OLARAK 1 slayt", generator.notes[0])
+
+    def test_multiple_returned_slides_are_merged_into_one(self):
+        class SplittingGenerator(NarrationGenerator):
+            def generate(self, sections, style_note=""):
+                return [
+                    Slide(title="Sayfa 1 - a", bullets=["birinci"], narration="İlk yarı."),
+                    Slide(title="Sayfa 1 - b", bullets=["ikinci"], narration="İkinci yarı."),
+                ]
+
+        generator = SplittingGenerator()
+        slides = generator.generate_chunked(
+            [RawSection("", "Sayfa 1", "içerik")],
+            request_interval_sec=0, continuity_context=False,
+            single_slide_per_section=True,
+        )
+
+        self.assertEqual(len(slides), 1)
+        self.assertEqual(slides[0].title, "Sayfa 1 - a")
+        self.assertEqual(slides[0].bullets, ["birinci", "ikinci"])
+        self.assertEqual(slides[0].narration, "İlk yarı. İkinci yarı.")
+
+    def test_disabled_by_default_allows_multiple_slides_per_chunk(self):
+        class SplittingGenerator(NarrationGenerator):
+            def generate(self, sections, style_note=""):
+                return [Slide(title="a"), Slide(title="b")]
+
+        generator = SplittingGenerator()
+        slides = generator.generate_chunked(
+            [RawSection("", "Sayfa 1", "içerik")],
+            request_interval_sec=0, continuity_context=False,
+        )
+
+        self.assertEqual(len(slides), 2)
+
+
+class MalformedJsonRecoveryTests(unittest.TestCase):
+    @patch("app.llm.agent_cli_provider.subprocess.run")
+    def test_broken_json_triggers_a_fix_prompt_retry(self, run):
+        broken = envelope("Kırık")[:-5]  # zarfı da, içindeki diziyi de bozar
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, broken, ""),
+            subprocess.CompletedProcess([], 0, envelope("Düzeltilmiş"), ""),
+        ]
+        generator = AgentCliNarrationGenerator(reuse_session=False)
+
+        slides = generator.generate([RawSection("", "Konu", "İçerik")])
+
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("SADECE geçerli bir JSON", run.call_args_list[1].kwargs["input"])
+        self.assertEqual(slides[0].title, "Düzeltilmiş")
+
+    @patch("app.llm.agent_cli_provider.subprocess.run")
+    def test_still_broken_after_retry_raises_clear_error(self, run):
+        run.return_value = subprocess.CompletedProcess([], 0, "bu hiç JSON değil", "")
+        generator = AgentCliNarrationGenerator(reuse_session=False)
+
+        with self.assertRaises(ValueError):
+            generator.generate([RawSection("", "Konu", "İçerik")])
+        self.assertEqual(run.call_count, 2)
+
 
 class PersistentSessionTests(unittest.TestCase):
     @patch("app.llm.agent_cli_provider.subprocess.run")

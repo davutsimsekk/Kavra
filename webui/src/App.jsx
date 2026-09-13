@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowLeft,
@@ -15,16 +15,21 @@ import {
   FileText,
   FolderOpen,
   GripVertical,
+  Image as ImageIcon,
   Layers3,
+  ListOrdered,
+  Wallet,
   LoaderCircle,
   Mic2,
   MonitorPlay,
   Plus,
   RefreshCw,
   Save,
+  ShieldCheck,
   Settings2,
   Sparkles,
   Trash2,
+  TriangleAlert,
   UploadCloud,
   WandSparkles,
   X,
@@ -45,6 +50,20 @@ const themeSwatches = {
   warm: ['#fff3d9', '#d87455'],
   mint: ['#e1fff5', '#2ea888'],
   aurora: ['#46389f', '#13a4a6'],
+}
+
+const SNAPSHOT_REASON_LABELS = {
+  'before-regenerate': 'yeniden üretim öncesi',
+  'before-restore': 'geri yükleme öncesi',
+}
+
+const QUEUE_STATUS_LABELS = {
+  queued: 'Sırada',
+  parsing: 'Ayrıştırılıyor',
+  generating: 'Anlatı üretiliyor',
+  rendering: 'Render ediliyor',
+  complete: 'Tamamlandı',
+  failed: 'Başarısız',
 }
 
 const ThreeBackdrop = lazy(() => import('./ThreeBackdrop.jsx'))
@@ -83,9 +102,9 @@ async function api(path, options = {}) {
   return data
 }
 
-function Toggle({ checked, onChange, label, hint, disabled = false }) {
+function Toggle({ checked, onChange, label, hint, disabled = false, wide = false }) {
   return (
-    <label className="toggle-row">
+    <label className={`toggle-row${wide ? ' wide' : ''}`}>
       <button
         type="button"
         className={`switch ${checked ? 'is-on' : ''}`}
@@ -132,11 +151,17 @@ export default function App() {
   const [bootstrapError, setBootstrapError] = useState('')
   const [bootstrapRetry, setBootstrapRetry] = useState(0)
   const [project, setProject] = useState(null)
+  // 'dashboard' (proje seç/oluştur) | 'hub' (seçili proje için modül seç) | 'video' (bugüne kadarki tüm akış)
+  const [view, setView] = useState('dashboard')
   const [stage, setStage] = useState('source')
   const [selectedSections, setSelectedSections] = useState(new Set())
   const [selectedSlide, setSelectedSlide] = useState(null)
   const [draft, setDraft] = useState(null)
   const [sourcePath, setSourcePath] = useState('')
+  const [pageMode, setPageMode] = useState(false)
+  const [visionEnrich, setVisionEnrich] = useState(false)
+  const [visionApiKey, setVisionApiKey] = useState('')
+  const [extractDiagrams, setExtractDiagrams] = useState(false)
   const [isDropping, setIsDropping] = useState(false)
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState(null)
@@ -144,12 +169,34 @@ export default function App() {
   const [jobState, setJobState] = useState(null)
   const [previewUrl, setPreviewUrl] = useState('')
   const [voices, setVoices] = useState([])
+  const [renderEstimate, setRenderEstimate] = useState(null)
+  const [chapters, setChapters] = useState(null)
+  const [snapshots, setSnapshots] = useState([])
+  const [showPronunciation, setShowPronunciation] = useState(false)
+  const [showQueue, setShowQueue] = useState(false)
+  const [showCost, setShowCost] = useState(false)
+  const [costSummary, setCostSummary] = useState(null)
+  const [queueItems, setQueueItems] = useState([])
+  const [queuePath, setQueuePath] = useState('')
+  const [queueBusy, setQueueBusy] = useState(false)
+  const [pronunciationEntries, setPronunciationEntries] = useState([])
+  const [newTerm, setNewTerm] = useState('')
+  const [newPhonetic, setNewPhonetic] = useState('')
+  const [previewText, setPreviewText] = useState('switch yapısını burada anlatıyoruz')
+  const [previewResult, setPreviewResult] = useState(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
   const [draggedSlide, setDraggedSlide] = useState(null)
+  // Kaydedilmiş oturum (proje/aşama/aktif iş) geri yüklenene kadar aşağıdaki
+  // patchSession efektlerinin state'in başlangıç değerleriyle (ör. stage='source')
+  // localStorage'ı ezmesini engeller — aksi halde asenkron restore daha kayıtlı
+  // değeri okuyamadan üzerine yazılırdı.
+  const sessionRestoredRef = useRef(false)
 
   const [llm, setLlm] = useState({
     provider: 'agent', apiKey: '', geminiModel: '', openaiModel: '', openaiEndpoint: '',
     agentCommand: '', reuseSession: true, maxSections: 4, timeout: 900,
     singleRequest: false, resumeCompleted: true, style: '', insertMode: 'append',
+    durationLimitEnabled: false, targetDurationMinutes: 60,
   })
   const [video, setVideo] = useState({
     theme: 'auto', ttsProvider: 'edge', voice: 'tr-TR-AhmetNeural', rate: '+0%',
@@ -197,6 +244,10 @@ export default function App() {
               setSelectedSections(new Set(projectData.sections.map((_, index) => index)))
               setSelectedSlide(projectData.slides.length ? 0 : null)
               if (session.stage) setStage(session.stage)
+              // Eski oturumlarda (bu özellik eklenmeden önce) view kaydı yok —
+              // aktif bir proje varsa geri döndüğümüzde doğrudan video modülüne
+              // (kaldığı yere) dönmek, panele atmaktan daha az sürpriz olur.
+              setView(session.view === 'hub' ? 'hub' : 'video')
               if (session.activeJob) {
                 api(`/api/jobs/${session.activeJob.id}`)
                   .then((job) => {
@@ -204,28 +255,47 @@ export default function App() {
                       setActiveJob(session.activeJob)
                       setJobState(job)
                     } else {
+                      // Uygulama/API en son bu iş çalışırken kapanmış olabilir —
+                      // PersistentJobStore böyle işleri anlaşılır bir hataya çevirir
+                      // (bkz. studio_web/job_store.py); kullanıcıya sessizce
+                      // kaybolmasın diye burada gösteriyoruz.
+                      if (job.status === 'failed') {
+                        setToast({ type: 'error', text: job.error || job.message })
+                      }
                       patchSession({ activeJob: null })
                     }
                   })
                   .catch(() => patchSession({ activeJob: null }))
+                  .finally(() => { sessionRestoredRef.current = true })
+              } else {
+                sessionRestoredRef.current = true
               }
             })
-            .catch(() => patchSession({ projectId: null, activeJob: null }))
+            .catch(() => {
+              patchSession({ projectId: null, activeJob: null })
+              sessionRestoredRef.current = true
+            })
+        } else {
+          sessionRestoredRef.current = true
         }
       })
       .catch((error) => setBootstrapError(error.message))
   }, [bootstrapRetry])
 
   useEffect(() => {
-    if (project?.id) patchSession({ projectId: project.id })
+    if (sessionRestoredRef.current && project?.id) patchSession({ projectId: project.id })
   }, [project?.id])
 
   useEffect(() => {
-    patchSession({ stage })
+    if (sessionRestoredRef.current) patchSession({ stage })
   }, [stage])
 
   useEffect(() => {
-    patchSession({ activeJob: activeJob || null })
+    if (sessionRestoredRef.current) patchSession({ view })
+  }, [view])
+
+  useEffect(() => {
+    if (sessionRestoredRef.current) patchSession({ activeJob: activeJob || null })
   }, [activeJob])
 
   useEffect(() => {
@@ -252,6 +322,171 @@ export default function App() {
   }, [video.ttsProvider])
 
   useEffect(() => {
+    if (!project?.id || !project?.slides?.length) {
+      setRenderEstimate(null)
+      return
+    }
+    api(`/api/projects/${project.id}/render-estimate?provider=${encodeURIComponent(video.ttsProvider)}`)
+      .then(setRenderEstimate)
+      .catch(() => setRenderEstimate(null))
+  }, [project?.id, project?.slides?.length, project?.assets?.canonicalSegmentCount, video.ttsProvider])
+
+  const refreshChapters = () => {
+    if (!project?.id) return
+    api(`/api/projects/${project.id}/chapters`).then(setChapters).catch(() => setChapters(null))
+  }
+
+  useEffect(() => {
+    if (!project?.id || !project?.slides?.length) {
+      setChapters(null)
+      return
+    }
+    refreshChapters()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, project?.slides?.length, project?.assets?.canonicalSegmentCount])
+
+  const exportChapters = async () => {
+    if (!project || activeJob) return
+    setJobState({ status: 'queued', progress: 0, message: 'Bölümler hazırlanıyor' })
+    try {
+      const response = await api(`/api/projects/${project.id}/chapters/export`, { method: 'POST' })
+      setActiveJob({ id: response.jobId, type: 'chapters' })
+    } catch (error) {
+      setJobState(null)
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const refreshSnapshots = () => {
+    if (!project?.id) return
+    api(`/api/projects/${project.id}/snapshots`)
+      .then(({ snapshots: list }) => setSnapshots(list))
+      .catch(() => setSnapshots([]))
+  }
+
+  useEffect(() => {
+    refreshSnapshots()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id])
+
+  const restoreSnapshotVersion = async (filename) => {
+    if (!project || activeJob) return
+    try {
+      const data = await api(`/api/projects/${project.id}/snapshots/${encodeURIComponent(filename)}/restore`, {
+        method: 'POST',
+      })
+      setProject((current) => current ? { ...current, slides: data.slides, quality: data.quality, assets: data.assets } : current)
+      setSnapshots(data.snapshots)
+      setToast({ type: 'success', text: 'Önceki sürüm geri yüklendi (mevcut hâl de otomatik saklandı).' })
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const loadPronunciation = () => {
+    api('/api/pronunciation').then(({ entries }) => setPronunciationEntries(entries)).catch(() => {})
+  }
+
+  useEffect(() => {
+    if (showPronunciation) loadPronunciation()
+  }, [showPronunciation])
+
+  const refreshQueue = () => {
+    api('/api/queue').then(({ items }) => setQueueItems(items)).catch(() => {})
+  }
+
+  useEffect(() => {
+    if (!showQueue) return
+    refreshQueue()
+    const timer = setInterval(refreshQueue, 2000)
+    return () => clearInterval(timer)
+  }, [showQueue])
+
+  useEffect(() => {
+    if (showCost) api('/api/cost-summary').then(setCostSummary).catch(() => {})
+  }, [showCost])
+
+  const addToQueue = async () => {
+    if (!queuePath.trim()) return
+    setQueueBusy(true)
+    try {
+      await api('/api/queue', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sourcePath: queuePath.trim(),
+          llmSettings: llm,
+          videoSettings: {
+            ttsProvider: video.ttsProvider, voice: video.voice, rate: video.rate,
+            elevenlabsKey: video.elevenlabsKey, subtitles: video.subtitles,
+            fadeTransitions: video.fadeTransitions, kenBurns: video.kenBurns,
+            theme: video.theme,
+          },
+        }),
+      })
+      setQueuePath('')
+      setToast({ type: 'success', text: 'Kuyruğa eklendi.' })
+      refreshQueue()
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setQueueBusy(false)
+    }
+  }
+
+  const removeQueueItem = async (id) => {
+    try {
+      await api(`/api/queue/${id}`, { method: 'DELETE' })
+      refreshQueue()
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const savePronunciationOverrides = async (overrides, successMessage) => {
+    try {
+      const data = await api('/api/pronunciation', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ overrides }),
+      })
+      setPronunciationEntries(data.entries)
+      if (successMessage) setToast({ type: 'success', text: successMessage })
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const addOrUpdatePronunciationTerm = () => {
+    const term = newTerm.trim().toLowerCase()
+    const phonetic = newPhonetic.trim()
+    if (!term || !phonetic) return
+    const overrides = {}
+    pronunciationEntries.filter((e) => e.isOverride).forEach((e) => { overrides[e.term] = e.phonetic })
+    overrides[term] = phonetic
+    savePronunciationOverrides(overrides, `"${term}" kaydedildi.`)
+    setNewTerm(''); setNewPhonetic('')
+  }
+
+  const removePronunciationOverride = (term) => {
+    const overrides = {}
+    pronunciationEntries.filter((e) => e.isOverride && e.term !== term).forEach((e) => { overrides[e.term] = e.phonetic })
+    savePronunciationOverrides(overrides, `"${term}" için özel telaffuz kaldırıldı.`)
+  }
+
+  const runPronunciationPreview = async () => {
+    if (!previewText.trim() || previewBusy) return
+    setPreviewBusy(true)
+    try {
+      const data = await api('/api/pronunciation/preview', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: previewText }),
+      })
+      setPreviewResult(data)
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setPreviewBusy(false)
+    }
+  }
+
+  useEffect(() => {
     if (!activeJob) return undefined
     let stopped = false
     const poll = async () => {
@@ -264,6 +499,7 @@ export default function App() {
             ...current,
             slides: job.result.slides,
             generation: job.result.generation || current.generation,
+            quality: job.result.quality || current.quality,
           } : current)
         }
         if (job.status === 'complete') {
@@ -272,14 +508,36 @@ export default function App() {
               ...current,
               slides: job.result.slides,
               generation: job.result.generation || current.generation,
+              quality: job.result.quality || current.quality,
             }))
             const skipped = job.result.skippedSectionCount || 0
             setToast({ type: 'success', text: skipped
               ? `${job.result.generatedCount} yeni slayt üretildi; daha önce biten ${skipped} bölüm atlandı.`
               : `${job.result.generatedCount} yeni slayt üretildi.` })
+          } else if (activeJob.type === 'regenerate') {
+            setProject((current) => current ? {
+              ...current,
+              slides: job.result.slides,
+              quality: job.result.quality || current.quality,
+              assets: job.result.assets || current.assets,
+            } : current)
+            setToast({ type: 'success', text: 'Slayt yeniden üretildi.' })
+            refreshSnapshots()
+          } else if (activeJob.type === 'chapters') {
+            setToast({ type: 'success', text: `${job.result.chapters.length} bölüm dosyası hazır.` })
+            if (project?.id) {
+              api(`/api/projects/${project.id}/chapters`).then(setChapters).catch(() => {})
+            }
           } else {
             setProject((current) => ({ ...current, outputs: { video: true, audio: true } }))
             setToast({ type: 'success', text: 'Video ve ses çıktısı hazır.' })
+            // Render bittiğinde ses/segment sayıları değişti; sağlık kartının
+            // güncel kalması için proje verisini (assets denetimi dahil) tazele.
+            if (project?.id) {
+              api(`/api/projects/${project.id}`)
+                .then((data) => setProject((current) => current ? { ...current, assets: data.assets } : current))
+                .catch(() => {})
+            }
           }
           setActiveJob(null)
         } else if (job.status === 'failed') {
@@ -331,6 +589,12 @@ export default function App() {
     [selectedSections, completedSections],
   )
   const effectiveSelectedCount = llm.resumeCompleted ? selectedRemainingCount : selectedSections.size
+  const quality = project?.quality
+  const qualityBlocked = Boolean(project?.slides?.length && quality && !quality.renderAllowed)
+  const assets = project?.assets
+  const selectedQualityIssues = selectedSlide === null
+    ? []
+    : (quality?.issues || []).filter((issue) => issue.slideIndex === selectedSlide)
 
   useEffect(() => {
     if (!oneShotSafe && llm.singleRequest) {
@@ -358,14 +622,39 @@ export default function App() {
     setPreviewUrl('')
   }
 
+  // Paneldeyken (henüz bir proje seçilmemişken) yeni bir kaynak ayrıştırılırsa
+  // doğrudan o projenin hub'ına geç; video modülünün KENDİ Kaynak adımından
+  // (view zaten 'video') tetiklenmişse mevcut davranış (aynı ekranda kal) korunur.
+  const goToHubIfComingFromDashboard = () => {
+    setView((current) => (current === 'dashboard' ? 'hub' : current))
+  }
+
+  const openProjectHub = async (id) => {
+    setBusy(true)
+    try {
+      const data = await api(`/api/projects/${id}`)
+      applyProject(data)
+      setView('hub')
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const uploadSource = async (file) => {
     if (!file) return
     const form = new FormData()
     form.append('file', file)
+    form.append('page_mode', pageMode ? 'true' : 'false')
+    form.append('vision_enrich', visionEnrich ? 'true' : 'false')
+    form.append('vision_api_key', visionApiKey.trim())
+    form.append('extract_diagrams', extractDiagrams ? 'true' : 'false')
     setBusy(true)
     try {
       const data = await api('/api/source/upload', { method: 'POST', body: form })
       applyProject(data)
+      goToHubIfComingFromDashboard()
       setToast({ type: 'success', text: `${data.sections.length} bölüm ayrıştırıldı.` })
     } catch (error) {
       setToast({ type: 'error', text: error.message })
@@ -380,9 +669,12 @@ export default function App() {
     try {
       const data = await api('/api/source/path', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: sourcePath.trim() }),
+        body: JSON.stringify({
+          path: sourcePath.trim(), pageMode, visionEnrich, visionApiKey: visionApiKey.trim(), extractDiagrams,
+        }),
       })
       applyProject(data)
+      goToHubIfComingFromDashboard()
       setToast({ type: 'success', text: `${data.sections.length} bölüm ayrıştırıldı.` })
     } catch (error) {
       setToast({ type: 'error', text: error.message })
@@ -403,10 +695,15 @@ export default function App() {
     if (!project) return
     setProject((current) => ({ ...current, slides }))
     try {
-      await api(`/api/projects/${project.id}/slides`, {
+      const data = await api(`/api/projects/${project.id}/slides`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slides }),
       })
+      setProject((current) => current ? {
+        ...current,
+        quality: data.quality,
+        assets: data.assets || current.assets,
+      } : current)
       if (message) setToast({ type: 'success', text: message })
     } catch (error) {
       setToast({ type: 'error', text: error.message })
@@ -416,16 +713,38 @@ export default function App() {
   const saveDraft = () => {
     if (selectedSlide === null || !draft) return
     const next = [...project.slides]
-    next[selectedSlide] = { ...draft, bullets: draft.bullets.filter(Boolean) }
+    next[selectedSlide] = { ...draft, bullets: draft.bullets.filter(Boolean), manuallyEdited: true }
     persistSlides(next, 'Slayt kaydedildi.')
   }
 
   const addSlide = () => {
     const at = selectedSlide === null ? project.slides.length : selectedSlide + 1
     const next = [...project.slides]
-    next.splice(at, 0, { title: 'Yeni slayt', bullets: [], code: null, narration: '', level: 'topic' })
+    next.splice(at, 0, {
+      title: 'Yeni slayt', bullets: [], code: null, narration: '', level: 'topic',
+      sourceSectionIds: [], sourceTitles: [], manuallyEdited: true,
+    })
     setSelectedSlide(at)
     persistSlides(next, 'Yeni slayt eklendi.')
+  }
+
+  const regenerateSlide = async () => {
+    if (selectedSlide === null || !project || activeJob) return
+    setJobState({ status: 'queued', progress: 0, message: 'Yeniden üretim hazırlanıyor' })
+    try {
+      const response = await api(`/api/projects/${project.id}/slides/${selectedSlide}/regenerate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: llm.provider, apiKey: llm.apiKey, style: llm.style,
+          agentCommand: llm.agentCommand, geminiModel: llm.geminiModel,
+          openaiEndpoint: llm.openaiEndpoint, openaiModel: llm.openaiModel, timeout: llm.timeout,
+        }),
+      })
+      setActiveJob({ id: response.jobId, type: 'regenerate' })
+    } catch (error) {
+      setJobState(null)
+      setToast({ type: 'error', text: error.message })
+    }
   }
 
   const deleteSlide = (index) => {
@@ -483,6 +802,17 @@ export default function App() {
     }
   }
 
+  const refreshQuality = async () => {
+    if (!project || activeJob) return
+    try {
+      const data = await api(`/api/projects/${project.id}/quality`, { method: 'POST' })
+      setProject((current) => current ? { ...current, quality: data.quality } : current)
+      setToast({ type: 'success', text: 'Anlatı kalite denetimi yenilendi.' })
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
   const preview = async () => {
     if (!project) return
     try {
@@ -510,31 +840,68 @@ export default function App() {
     }
   }
 
+  const renderSourceIngest = () => (
+    <section className="panel source-ingest">
+      <div className="section-heading">
+        <span className="kicker">MATERYAL GİRİŞİ</span>
+        <h2>Dersin hammaddesini içeri al.</h2>
+        <p>PDF, PowerPoint veya Markdown dosyasını bırak. Bölümleri senin için ayrıştırıp seçilebilir hale getireceğiz.</p>
+      </div>
+      <label
+        className={`drop-zone ${isDropping ? 'is-dropping' : ''}`}
+        onDragOver={(event) => { event.preventDefault(); setIsDropping(true) }}
+        onDragLeave={() => setIsDropping(false)}
+        onDrop={(event) => { event.preventDefault(); setIsDropping(false); uploadSource(event.dataTransfer.files[0]) }}
+      >
+        <input type="file" accept=".md,.pptx,.pdf" onChange={(event) => uploadSource(event.target.files[0])} />
+        <span className="upload-orbit"><UploadCloud size={28} /></span>
+        <strong>{busy ? 'Dosya işleniyor…' : 'Dosyayı buraya bırak'}</strong>
+        <small>veya seçmek için tıkla · en fazla 100 MB</small>
+      </label>
+      <div className="path-divider"><span>ya da bu bilgisayardaki yolu kullan</span></div>
+      <div className="path-input">
+        <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="D:\\dersler\\konu.pdf" />
+        <button className="button ghost" onClick={parsePath} disabled={!sourcePath.trim() || busy}>Ayrıştır</button>
+      </div>
+      <Toggle
+        wide
+        checked={pageMode}
+        onChange={setPageMode}
+        label="Sayfaları birebir slayt olarak kullan (yalnızca PDF)"
+        hint={pageMode
+          ? 'Her PDF sayfası olduğu gibi bir slayt görseli olur (bizim tema/başlık/madde tasarımımız kullanılmaz); yapay zeka sadece o sayfa için anlatım metni yazar. PDF olmayan bir dosyada bu seçenek hataya yol açar.'
+          : 'Kapalıyken içerik her zamanki gibi kendi slayt tasarımımızla (tema, başlık, madde) yeniden oluşturulur.'}
+      />
+      <Toggle
+        wide
+        checked={visionEnrich}
+        onChange={setVisionEnrich}
+        label="Görsel anlama kullan (yalnızca PDF)"
+        hint={visionEnrich
+          ? 'Metni çok az/hiç olmayan sayfalar (muhtemelen diyagram/ekran görüntüsü) Gemini\'ye gönderilip bir açıklama alınır — anlatım sağlayıcın ne olursa olsun (multimodal olması gerekmez), o metni kullanır. Sayfa/görsel başına ek bir API çağrısı, dolayısıyla ek maliyet demektir.'
+          : 'Kapalıyken görsel-ağırlıklı sayfalar normal modda atlanır, sayfa modunda ise metinsiz bırakılır.'}
+      />
+      {visionEnrich && !bootstrap.keysConfigured.gemini && (
+        <label className="field wide">
+          <span>Gemini API anahtarı (sadece görsel anlama için)</span>
+          <input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Anlatım sağlayıcından bağımsız, ücretsiz alınabilir" />
+        </label>
+      )}
+      <Toggle
+        wide
+        checked={extractDiagrams}
+        onChange={setExtractDiagrams}
+        label="Diyagram/görsel çıkar (yalnızca PDF)"
+        hint={extractDiagrams
+          ? 'Sayfadaki gerçek, gömülü bir görsel (diyagram/grafik) varsa olduğu gibi çıkarılıp o sayfanın slaydına, maddelerin yanına yerleştirilir — hiçbir şey üretilmez/yapay zekaya çizdirilmez, kaynaktaki piksellerin birebir kopyası kullanılır. Ücretsiz, API gerektirmez.'
+          : 'Kapalıyken slaytlar her zamanki gibi sadece metinle (başlık/madde) oluşturulur.'}
+      />
+    </section>
+  )
+
   const renderSource = () => (
     <div className="stage-grid source-grid">
-      <section className="panel source-ingest">
-        <div className="section-heading">
-          <span className="kicker">MATERYAL GİRİŞİ</span>
-          <h2>Dersin hammaddesini içeri al.</h2>
-          <p>PDF, PowerPoint veya Markdown dosyasını bırak. Bölümleri senin için ayrıştırıp seçilebilir hale getireceğiz.</p>
-        </div>
-        <label
-          className={`drop-zone ${isDropping ? 'is-dropping' : ''}`}
-          onDragOver={(event) => { event.preventDefault(); setIsDropping(true) }}
-          onDragLeave={() => setIsDropping(false)}
-          onDrop={(event) => { event.preventDefault(); setIsDropping(false); uploadSource(event.dataTransfer.files[0]) }}
-        >
-          <input type="file" accept=".md,.pptx,.pdf" onChange={(event) => uploadSource(event.target.files[0])} />
-          <span className="upload-orbit"><UploadCloud size={28} /></span>
-          <strong>{busy ? 'Dosya işleniyor…' : 'Dosyayı buraya bırak'}</strong>
-          <small>veya seçmek için tıkla · en fazla 100 MB</small>
-        </label>
-        <div className="path-divider"><span>ya da bu bilgisayardaki yolu kullan</span></div>
-        <div className="path-input">
-          <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="D:\\dersler\\konu.pdf" />
-          <button className="button ghost" onClick={parsePath} disabled={!sourcePath.trim() || busy}>Ayrıştır</button>
-        </div>
-      </section>
+      {renderSourceIngest()}
 
       <section className="panel section-library">
         <div className="panel-toolbar">
@@ -600,11 +967,24 @@ export default function App() {
           {[['agent', 'Claude Agent'], ['gemini', 'Gemini API'], ['openai', 'OpenAI uyumlu']].map(([id, label]) => <button key={id} className={llm.provider === id ? 'active' : ''} onClick={() => setLlm({ ...llm, provider: id, apiKey: '' })}>{label}</button>)}
         </div>
         <div className="form-grid">{renderProviderFields()}
-          <label className="field"><span>Bir LLM çağrısındaki kaynak bölümü</span><input disabled={llm.singleRequest} type="number" min="1" max="20" value={llm.maxSections} onChange={(e) => setLlm({ ...llm, maxSections: Number(e.target.value) })} /><small>Üretilen slayt sayısı değil; PDF/PPT içinden aynı çağrıya konan bölüm sayısıdır.</small></label>
+          <label className="field"><span>Bir LLM çağrısındaki kaynak bölümü</span><input disabled={llm.singleRequest || project?.pageMode} type="number" min="1" max="20" value={project?.pageMode ? 1 : llm.maxSections} onChange={(e) => setLlm({ ...llm, maxSections: Number(e.target.value) })} /><small>{project?.pageMode ? 'Sayfa modunda her çağrı tam olarak 1 sayfa alır (değiştirilemez).' : 'Üretilen slayt sayısı değil; PDF/PPT içinden aynı çağrıya konan bölüm sayısıdır.'}</small></label>
           <label className="field"><span>Timeout</span><div className="input-suffix"><input type="number" min="60" step="60" value={llm.timeout} onChange={(e) => setLlm({ ...llm, timeout: Number(e.target.value) })} /><b>sn</b></div></label>
           <label className="field wide"><span>Üslup yönlendirmesi</span><textarea rows="2" value={llm.style} onChange={(e) => setLlm({ ...llm, style: e.target.value })} placeholder="Örn. kavramsal, sakin, klinik örneklerle…" /></label>
           <label className="field"><span>Yeni slaytların yeri</span><select value={llm.insertMode} onChange={(e) => setLlm({ ...llm, insertMode: e.target.value })}><option value="append">Listenin sonu</option><option value="after">Seçili slayttan sonra</option></select></label>
-          <Toggle checked={llm.singleRequest} disabled={!oneShotSafe} onChange={(value) => setLlm({ ...llm, singleRequest: value })} label="Tek istekte gönder" hint={oneShotSafe ? 'En fazla 12 bölüm / 24.000 karakter' : `${selectedSections.size} bölüm ve ${selectedSourceCharacters.toLocaleString('tr-TR')} karakter: güvenli sınırın üzerinde`} />
+          <Toggle checked={llm.singleRequest} disabled={!oneShotSafe || project?.pageMode} onChange={(value) => setLlm({ ...llm, singleRequest: value })} label="Tek istekte gönder" hint={project?.pageMode ? 'Sayfa modunda kullanılamaz — her sayfa ayrı işlenmeli.' : oneShotSafe ? 'En fazla 12 bölüm / 24.000 karakter' : `${selectedSections.size} bölüm ve ${selectedSourceCharacters.toLocaleString('tr-TR')} karakter: güvenli sınırın üzerinde`} />
+          {project?.pageMode && (
+            <div className="session-note wide"><ImageIcon size={14} /><span>Sayfa modu aktif: her slaytın görseli, kaynak PDF sayfasının kendisi olacak (bizim tema tasarımımız kullanılmayacak). Yapay zeka sadece o sayfa için anlatım metni üretiyor.</span></div>
+          )}
+          <Toggle
+            wide
+            checked={llm.durationLimitEnabled}
+            onChange={(value) => setLlm({ ...llm, durationLimitEnabled: value })}
+            label="Süre hedefi kullan"
+            hint={llm.durationLimitEnabled
+              ? 'Her parçaya, kaynaktaki payıyla orantılı bir süre/kelime bütçesi verilir (ör. kaynağın %5\'ini oluşturan bölüme hedefin ~%5\'i düşer).'
+              : 'Kapalıyken mevcut davranış aynen sürer: parçalar süre sınırı olmadan, olabildiğince öğretici anlatılır.'}
+          />
+          <label className="field"><span>Hedef toplam süre</span><div className="input-suffix"><input disabled={!llm.durationLimitEnabled} type="number" min="1" max="1000" value={llm.targetDurationMinutes} onChange={(e) => setLlm({ ...llm, targetDurationMinutes: Number(e.target.value) })} /><b>dk</b></div><small>{llm.durationLimitEnabled ? `≈ ${Math.round(llm.targetDurationMinutes * 132).toLocaleString('tr-TR')} kelimelik toplam anlatım bütçesi` : 'Süre hedefi kapalı'}</small></label>
           <Toggle checked={llm.resumeCompleted} onChange={(value) => setLlm({ ...llm, resumeCompleted: value })} label="Kaldığı yerden devam et" hint={`Tamamlanan ${project?.generation?.completedCount || 0} bölümü tekrar gönderme`} />
           <div className="resume-note wide">
             <CheckCircle2 size={15} />
@@ -622,6 +1002,22 @@ export default function App() {
 
       <section className="panel slide-rail">
         <div className="panel-toolbar"><div><span className="kicker">AKIŞ</span><h3>{project?.slides.length || 0} slayt</h3></div><button className="icon-button" onClick={addSlide} title="Yeni slayt"><Plus size={18} /></button></div>
+        {project?.slides.length > 0 && <div className={`quality-card ${quality?.status || 'unknown'}`}>
+          <span className="quality-icon">{quality?.status === 'passed' ? <ShieldCheck size={19} /> : <TriangleAlert size={19} />}</span>
+          <span>
+            <strong>{quality?.status === 'passed' ? 'Anlatı temiz' : quality?.status === 'blocked' ? 'Düzeltme gerekli' : 'Gözden geçir'}</strong>
+            <small>{quality?.score ?? '—'}/100 · {quality?.errorCount || 0} kritik · {quality?.warningCount || 0} uyarı</small>
+          </span>
+          <button type="button" onClick={refreshQuality} disabled={Boolean(activeJob)} aria-label="Kalite denetimini yenile"><RefreshCw size={13} /></button>
+        </div>}
+        {snapshots.length > 0 && <div className="chapter-list snapshot-list">
+          {snapshots.map((snap) => (
+            <div key={snap.filename} className="chapter-item">
+              <span>{SNAPSHOT_REASON_LABELS[snap.reason] || snap.reason} <small>({snap.slideCount ?? '?'} slayt, {new Date(snap.savedAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })})</small></span>
+              <a onClick={(event) => { event.preventDefault(); restoreSnapshotVersion(snap.filename) }} href="#restore">Geri Yükle</a>
+            </div>
+          ))}
+        </div>}
         {!project?.slides.length ? <EmptyState icon={Layers3} title="Anlatı henüz boş">Seçili bölümlerden ilk slayt setini üret.</EmptyState> : <div className="slide-list">
           {project.slides.map((slide, index) => <article
             key={`${slide.title}-${index}`}
@@ -647,12 +1043,23 @@ export default function App() {
       <section className="panel editor-panel">
         <div className="panel-toolbar"><div><span className="kicker">DÜZENLEYİCİ</span><h3>{draft ? `Slayt ${(selectedSlide || 0) + 1}` : 'Bir slayt seç'}</h3></div>{draft && <button className="button compact" onClick={saveDraft}><Save size={15} /> Kaydet</button>}</div>
         {!draft ? <EmptyState icon={Settings2} title="Ayrıntıları düzenle">Akıştan bir slayt seçerek başlık, maddeler ve anlatım metnini değiştirebilirsin.</EmptyState> : <div className="editor-form">
+          {draft.sourceSectionIds?.length > 0 ? <div className="source-row">
+            <span className="source-label"><Layers3 size={13} /> Kaynak: {draft.sourceTitles?.join(', ') || `${draft.sourceSectionIds.length} bölüm`}</span>
+            <button type="button" className="button ghost compact" onClick={regenerateSlide} disabled={Boolean(activeJob)}>
+              <RefreshCw size={13} /> Bu slaytı yeniden üret
+            </button>
+          </div> : <div className="source-row muted"><span className="source-label">Elle eklendi · kaynağı yok</span></div>}
+          <ProgressStrip job={activeJob?.type === 'regenerate' || jobState?.kind === 'regenerate' ? jobState : null} />
           <label className="field"><span>Başlık</span><input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
           <label className="field"><span>Tür</span><select value={draft.level} onChange={(e) => setDraft({ ...draft, level: e.target.value })}><option value="topic">Konu slaytı</option><option value="chapter">Bölüm kapağı</option></select></label>
           <label className="field"><span>Maddeler <em>satır başına bir tane</em></span><textarea rows="5" value={draft.bullets.join('\n')} onChange={(e) => setDraft({ ...draft, bullets: e.target.value.split('\n') })} /></label>
           <label className="field"><span>Kod</span><textarea className="code-input" rows="5" value={draft.code || ''} onChange={(e) => setDraft({ ...draft, code: e.target.value || null })} placeholder="İsteğe bağlı" /></label>
           <label className="field"><span>Tam anlatım metni</span><textarea rows="11" value={draft.narration} onChange={(e) => setDraft({ ...draft, narration: e.target.value })} /></label>
           <div className="editor-meta"><Clock3 size={14} /><span>Yaklaşık {Math.max(1, Math.round((draft.narration || '').split(/\s+/).length / 2.2))} sn anlatım</span></div>
+          {selectedQualityIssues.length > 0 && <div className="quality-issues">
+            <strong><TriangleAlert size={14} /> Bu slaytta {selectedQualityIssues.length} bulgu</strong>
+            {selectedQualityIssues.map((issue, index) => <div key={`${issue.code}-${index}`} className={issue.severity}>{issue.message}</div>)}
+          </div>}
         </div>}
       </section>
     </div>
@@ -687,20 +1094,140 @@ export default function App() {
 
       <section className="panel voice-panel">
         <div className="panel-toolbar"><div><span className="kicker">SESLENDİRME</span><h3>Ses karakteri</h3></div><Mic2 size={19} /></div>
+        {assets && assets.slideCount > 0 && <div className="health-card">
+          <div className="health-row">
+            <span>Ses</span>
+            <strong>{assets.canonicalAudioCount}/{assets.slideCount} hazır</strong>
+            {assets.missingAudioCount > 0 && <small className="health-missing">{assets.missingAudioCount} eksik</small>}
+          </div>
+          <div className="health-row">
+            <span>Video segmenti</span>
+            <strong>{assets.canonicalSegmentCount}/{assets.slideCount} hazır</strong>
+            {assets.missingSegmentCount > 0 && <small className="health-missing">{assets.missingSegmentCount} eksik</small>}
+          </div>
+          {assets.orphanCount > 0 && <div className="health-row"><span>Eski dosya</span><small className="health-missing">{assets.orphanCount} karantinada</small></div>}
+          <small className="health-hint">
+            {assets.missingSegmentCount === 0 && assets.slideCount > 0
+              ? 'Tüm slaytlar render edilmiş; tekrar render sadece değişenleri günceller.'
+              : 'Render başladığında hazır olanlar atlanır, yalnızca eksikler üretilir.'}
+          </small>
+        </div>}
         <div className="editor-form">
           <label className="field"><span>Sağlayıcı</span><select value={video.ttsProvider} onChange={(e) => setVideo({ ...video, ttsProvider: e.target.value })}>{bootstrap.ttsProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.id} — {provider.label.split('(')[0]}</option>)}</select></label>
           <label className="field"><span>Ses</span><select value={video.voice} onChange={(e) => setVideo({ ...video, voice: e.target.value })}>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
           <label className="field"><span>Konuşma hızı</span><select value={video.rate} onChange={(e) => setVideo({ ...video, rate: e.target.value })}>{['-20%', '-10%', '+0%', '+10%', '+20%'].map((rate) => <option key={rate}>{rate}</option>)}</select></label>
           {video.ttsProvider === 'elevenlabs' && <label className="field"><span>ElevenLabs API anahtarı</span><input type="password" value={video.elevenlabsKey} onChange={(e) => setVideo({ ...video, elevenlabsKey: e.target.value })} /></label>}
         </div>
-        <button className="button primary render-button" onClick={render} disabled={!project?.slides.length || Boolean(activeJob)}><Clapperboard size={17} /> {activeJob?.type === 'video' ? 'Render sürüyor…' : 'Videoyu oluştur'}</button>
+        {renderEstimate && <div className={`estimate-card ${renderEstimate.diskWarning ? 'warning' : ''}`}>
+          <div className="health-row"><span>Tahmini süre</span><strong>{renderEstimate.estimatedMinutes} dk ({renderEstimate.wordsTotal} kelime)</strong></div>
+          <div className="health-row"><span>Bu render'da üretilecek</span><strong>{renderEstimate.slidesToRender} slayt</strong>{renderEstimate.slidesReusable > 0 && <small className="health-hint">({renderEstimate.slidesReusable} zaten hazır, atlanacak)</small>}</div>
+          {renderEstimate.estimatedDiskMb > 0 && <div className="health-row">
+            <span>Tahmini disk</span>
+            <strong>~{renderEstimate.estimatedDiskMb} MB</strong>
+            {renderEstimate.freeDiskMb != null && <small className={renderEstimate.diskWarning ? 'health-missing' : 'health-hint'}>{renderEstimate.freeDiskMb.toLocaleString('tr-TR')} MB boş</small>}
+          </div>}
+          <small className={renderEstimate.providerIsLocal ? 'health-hint' : 'health-missing'}>{renderEstimate.providerCostNote}</small>
+        </div>}
+        {qualityBlocked && <div className="render-gate"><TriangleAlert size={16} /><span>Ücretli veya ağır ses üretimi başlamadan önce kritik anlatı sorunlarını düzelt.</span></div>}
+        <button className="button primary render-button" onClick={render} disabled={!project?.slides.length || Boolean(activeJob) || qualityBlocked}><Clapperboard size={17} /> {activeJob?.type === 'video' ? 'Render sürüyor…' : 'Videoyu oluştur'}</button>
         <ProgressStrip job={activeJob?.type === 'video' || jobState?.kind === 'video' ? jobState : null} />
         {project?.outputs?.video && <div className="output-actions"><a className="button ghost" href={`/api/projects/${project.id}/output/video`}><MonitorPlay size={16} /> Videoyu aç</a><button className="button ghost" onClick={() => api(`/api/projects/${project.id}/open-output`, { method: 'POST' })}><FolderOpen size={16} /> Klasörü aç</button></div>}
+        {project?.slides?.length > 0 && <div className="export-row">
+          <span className="source-label"><FileText size={13} /> Çalışma materyali (ücretsiz, anında)</span>
+          <div className="export-links">
+            <a className="button ghost compact" href={`/api/projects/${project.id}/export/notes`}>Ders Notu (.md)</a>
+            <a className="button ghost compact" href={`/api/projects/${project.id}/export/transcript`}>Transkript (.txt)</a>
+            <a className="button ghost compact" href={`/api/projects/${project.id}/export/anki`}>Anki (.tsv)</a>
+            <a className="button ghost compact" href={`/api/projects/${project.id}/export/quiz`}>Kendini Test Et (.md)</a>
+            <a className="button ghost compact" href={`/api/projects/${project.id}/export/srt`}>Altyazı (.srt)</a>
+            <a className="button ghost compact" href={`/api/projects/${project.id}/export/vtt`}>Altyazı (.vtt)</a>
+          </div>
+          <small>Altyazı dosyaları videodaki yakılmış altyazıdan bağımsız, ayrıca YouTube'a yüklenebilir. Render'dan önce kaba tahmini, render'dan sonra gerçek zamanlamayla üretilir.</small>
+        </div>}
+        {chapters?.chapters?.length > 1 && <div className="export-row">
+          <span className="source-label"><Layers3 size={13} /> Bölüm bazlı çıktı ({chapters.chapters.length} bölüm) — uzun dersi YouTube'a ayrı ayrı yüklemek için</span>
+          {!chapters.allRendered && <small className="health-missing">{chapters.missingCount} slayt henüz render edilmemiş — önce yukarıdan tam render tamamla.</small>}
+          <button type="button" className="button ghost compact" onClick={exportChapters} disabled={!chapters.allRendered || Boolean(activeJob)}>
+            <Clapperboard size={13} /> {activeJob?.type === 'chapters' ? 'Hazırlanıyor…' : 'Bölüm Videolarını Oluştur'}
+          </button>
+          <ProgressStrip job={activeJob?.type === 'chapters' || jobState?.kind === 'chapters' ? jobState : null} />
+          {chapters.chapters.some((c) => c.exported) && <div className="chapter-list">
+            {chapters.chapters.filter((c) => c.exported).map((c) => (
+              <div key={c.index} className="chapter-item">
+                <span>{c.index}. {c.title} <small>({c.slideCount} slayt)</small></span>
+                <a href={`/api/projects/${project.id}/chapters/download/${c.videoFile}`}>MP4</a>
+                <a href={`/api/projects/${project.id}/chapters/download/${c.audioFile}`}>MP3</a>
+              </div>
+            ))}
+            {chapters.youtubeChaptersReady && <a className="button ghost compact" href={`/api/projects/${project.id}/chapters/download/youtube-chapters.txt`}>YouTube Chapters (.txt)</a>}
+          </div>}
+        </div>}
       </section>
     </div>
   )
 
   if (!bootstrap) return <div className="app-loading"><AmbientBackdrop />{bootstrapError ? <><span className="brand-mark error-mark"><CircleAlert /></span><h1>Yerel servis bağlantısı yok</h1><p>{bootstrapError}</p><button className="button primary" onClick={() => setBootstrapRetry((value) => value + 1)}><RefreshCw size={16} /> Yeniden bağlan</button></> : <><span className="brand-mark"><Sparkles /></span><h1>Ders Stüdyosu</h1><p>Çalışma alanın hazırlanıyor…</p><LoaderCircle className="spin" /></>}</div>
+
+  if (view === 'dashboard') {
+    return (
+      <div className="dashboard-shell">
+        <AmbientBackdrop />
+        <div className="dashboard-hero">
+          <span className="brand-mark"><Sparkles size={22} /></span>
+          <h1>Ders Stüdyosu</h1>
+          <p>Bir kaynak seç ya da yeni bir tane ekle; sonra ne yapmak istediğine karar ver.</p>
+        </div>
+        <div className="dashboard-grid">
+          <section className="panel dashboard-projects">
+            <div className="panel-toolbar"><div><span className="kicker">PROJELER</span><h3>Var olan kaynaklar</h3></div></div>
+            <div className="dashboard-project-list">
+              {bootstrap.projects.length === 0 && (
+                <EmptyState icon={FolderOpen} title="Henüz proje yok">Sağdan yeni bir kaynak ekleyerek başla.</EmptyState>
+              )}
+              {bootstrap.projects.map((item) => (
+                <button key={item.id} className="dashboard-project-card" onClick={() => openProjectHub(item.id)} disabled={busy}>
+                  <FolderOpen size={20} />
+                  <span className="dashboard-project-card-main"><strong>{item.id}</strong><small>{item.sections} bölüm · {item.slides} slayt</small></span>
+                  <ChevronRight size={16} />
+                </button>
+              ))}
+            </div>
+          </section>
+          <div className="dashboard-upload">{renderSourceIngest()}</div>
+        </div>
+        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+      </div>
+    )
+  }
+
+  if (view === 'hub') {
+    const hubCompletion = project ? (project.outputs?.video ? 100 : project.slides.length ? 66 : 20) : 0
+    return (
+      <div className="dashboard-shell">
+        <AmbientBackdrop />
+        <button className="button quiet hub-back" onClick={() => setView('dashboard')}><ArrowLeft size={16} /> Panele dön</button>
+        <div className="dashboard-hero">
+          <span className="kicker">PROJE</span>
+          <h1>{project?.id}</h1>
+          <p>{project?.sections.length || 0} bölüm · {project?.slides.length || 0} slayt — ne yapmak istiyorsun?</p>
+        </div>
+        <div className="hub-modules">
+          <button className="hub-module-card" onClick={() => setView('video')}>
+            <Clapperboard size={30} />
+            <strong>Video Üretimi</strong>
+            <small>{project?.outputs?.video ? 'Video hazır — düzenlemeye devam et' : project?.slides.length ? 'Anlatı hazır, render bekliyor' : 'Henüz başlanmadı'}</small>
+            <div className="mini-progress"><span style={{ width: `${hubCompletion}%` }} /></div>
+          </button>
+          <button className="hub-module-card disabled" disabled title="Yakında">
+            <Layers3 size={30} />
+            <strong>Flashcard Çalışma</strong>
+            <small>Yakında — kaynaktan akıllı kartlar üretip burada çalışabileceksin</small>
+          </button>
+        </div>
+        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+      </div>
+    )
+  }
 
   return (
     <div className="app-shell">
@@ -728,7 +1255,7 @@ export default function App() {
       <main className="main-shell">
         <header className="topbar">
           <div><span className="topbar-eyebrow">{steps.find((item) => item.id === stage)?.eyebrow} / PIPELINE</span><h1>{stage === 'source' ? 'İçeriği seç ve yapılandır' : stage === 'script' ? 'Anlatıyı tasarla' : 'Dersi yayına hazırla'}</h1></div>
-          <div className="topbar-meta"><span><span className="status-dot" /> Pipeline bağlı</span><button className="icon-button" title="Ayarlar"><Settings2 size={18} /></button></div>
+          <div className="topbar-meta"><button className="button quiet compact" onClick={() => setView('hub')}><ArrowLeft size={15} /> Panele dön</button><span><span className="status-dot" /> Pipeline bağlı</span><button className="icon-button" title="Kullanım / maliyet" onClick={() => setShowCost(true)}><Wallet size={18} /></button><button className="icon-button" title="Toplu kuyruk" onClick={() => setShowQueue(true)}><ListOrdered size={18} /></button><button className="icon-button" title="Telaffuz sözlüğü" onClick={() => setShowPronunciation(true)}><Settings2 size={18} /></button></div>
         </header>
         <div className="stage-content">
           {stage === 'source' && renderSource()}
@@ -743,6 +1270,105 @@ export default function App() {
       </main>
 
       {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+
+      {showPronunciation && <div className="modal-backdrop" onClick={() => setShowPronunciation(false)}>
+        <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <div><strong>Telaffuz Sözlüğü</strong><small>Türkçe TTS'in İngilizce/kod terimlerini yanlış okumasını düzeltir — tüm projelerde geçerlidir.</small></div>
+            <button className="icon-button" onClick={() => setShowPronunciation(false)}><X size={18} /></button>
+          </div>
+          <div className="modal-body">
+            <div className="pronunciation-preview">
+              <label className="field wide"><span>Hızlı önizleme (bir cümle yaz, nasıl seslendirileceğini dinle)</span>
+                <textarea rows="2" value={previewText} onChange={(e) => setPreviewText(e.target.value)} />
+              </label>
+              <button className="button ghost compact" onClick={runPronunciationPreview} disabled={previewBusy || !previewText.trim()}>
+                {previewBusy ? 'Üretiliyor…' : 'Dinle (Edge-TTS)'}
+              </button>
+              {previewResult && <div className="preview-result">
+                <small>Seslendirilecek metin: “{previewResult.normalizedText}”</small>
+                <audio controls src={previewResult.audioUrl} />
+              </div>}
+            </div>
+            <div className="pronunciation-add">
+              <label className="field"><span>Terim</span><input value={newTerm} onChange={(e) => setNewTerm(e.target.value)} placeholder="ör. kernel" /></label>
+              <label className="field"><span>Fonetik Türkçe yazım</span><input value={newPhonetic} onChange={(e) => setNewPhonetic(e.target.value)} placeholder="ör. körnıl" /></label>
+              <button className="button primary compact" onClick={addOrUpdatePronunciationTerm} disabled={!newTerm.trim() || !newPhonetic.trim()}><Plus size={14} /> Ekle / Güncelle</button>
+            </div>
+            <div className="pronunciation-list">
+              {pronunciationEntries.map((entry) => (
+                <div key={entry.term} className={`pronunciation-row ${entry.isOverride ? 'override' : ''}`}>
+                  <span className="pronunciation-term">{entry.term}</span>
+                  <span className="pronunciation-arrow">→</span>
+                  <span className="pronunciation-phonetic">{entry.phonetic}</span>
+                  {entry.isOverride ? (
+                    <button className="icon-button danger" title="Özel telaffuzu kaldır" onClick={() => removePronunciationOverride(entry.term)}><Trash2 size={14} /></button>
+                  ) : <small className="health-hint">varsayılan</small>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>}
+
+      {showQueue && <div className="modal-backdrop" onClick={() => setShowQueue(false)}>
+        <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <div><strong>Toplu Kuyruk</strong><small>Birden fazla PDF/PPTX/MD dosyasını sıraya koy — şu anki Üretim ve Stüdyo ayarlarınla, gözetimsiz olarak sırayla ayrıştırılıp üretilir ve render edilir.</small></div>
+            <button className="icon-button" onClick={() => setShowQueue(false)}><X size={18} /></button>
+          </div>
+          <div className="modal-body">
+            <div className="path-input">
+              <input value={queuePath} onChange={(e) => setQueuePath(e.target.value)} placeholder="D:\\dersler\\konu.pdf" />
+              <button className="button ghost" onClick={addToQueue} disabled={!queuePath.trim() || queueBusy}>Kuyruğa Ekle</button>
+            </div>
+            <small className="health-hint">Eklendiği andaki Üretim ayarları (sağlayıcı, üslup vb.) ve Stüdyo ayarları (ses, tema) anlık görüntü olarak alınır; kuyruk işlenirken bu ayarları değiştirsen bile bu öğeyi etkilemez.</small>
+            <div className="queue-list">
+              {queueItems.length === 0 && <small className="health-hint">Kuyrukta öğe yok.</small>}
+              {queueItems.map((item) => (
+                <div key={item.id} className={`queue-item queue-item-${item.status}`}>
+                  <span className="queue-item-main">
+                    <strong>{item.projectName}</strong>
+                    <small>{item.stage}{item.error ? ` — ${item.error}` : ''}</small>
+                  </span>
+                  <span className={`queue-status-badge queue-status-${item.status}`}>{QUEUE_STATUS_LABELS[item.status] || item.status}</span>
+                  {['queued', 'complete', 'failed'].includes(item.status) && (
+                    <button className="icon-button danger" title="Kuyruktan kaldır" onClick={() => removeQueueItem(item.id)}><Trash2 size={14} /></button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>}
+
+      {showCost && <div className="modal-backdrop" onClick={() => setShowCost(false)}>
+        <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <div><strong>Kullanım / Maliyet</strong><small>Tüm projeler genelinde. Sadece kendi maliyetini bildiren sağlayıcılar (Claude Agent CLI) için gerçek $ gösterilir — diğerleri için ASLA tahmin üretilmez, sadece kullanım miktarı gösterilir.</small></div>
+            <button className="icon-button" onClick={() => setShowCost(false)}><X size={18} /></button>
+          </div>
+          <div className="modal-body">
+            {!costSummary && <small className="health-hint">Yükleniyor…</small>}
+            {costSummary && <>
+              <div className="cost-total">
+                <strong>${costSummary.totalUsd.toFixed(4)}</strong>
+                <small>bilinen toplam maliyet{costSummary.hasUnknownCostProvider ? ' (bazı sağlayıcılar maliyetini bildirmiyor, aşağıda ayrıca işaretli)' : ''}</small>
+              </div>
+              <div className="cost-provider-list">
+                {Object.keys(costSummary.byProvider).length === 0 && <small className="health-hint">Henüz kayıtlı kullanım yok.</small>}
+                {Object.entries(costSummary.byProvider).map(([provider, data]) => (
+                  <div key={provider} className="cost-provider-row">
+                    <strong>{provider}</strong>
+                    <span>{data.hasUnknownCost ? 'maliyet bilinmiyor — kendi hesabından kontrol et' : `$${data.usd.toFixed(4)}`}</span>
+                    <small>{data.words > 0 ? `${data.words.toLocaleString('tr-TR')} kelime` : ''}{data.requests > 1 ? ` · ${data.requests} istek` : ''}</small>
+                  </div>
+                ))}
+              </div>
+            </>}
+          </div>
+        </div>
+      </div>}
     </div>
   )
 }

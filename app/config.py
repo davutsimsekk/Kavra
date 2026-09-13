@@ -67,6 +67,12 @@ class VideoOptions:
     accent_rgb: tuple | None = None
 
 
+# Ortalama Türkçe ders anlatımı hızı — render_estimate (önizleme) ve
+# generate_chunked'ın süre-hedefi bütçelemesi (app/llm/base.py) aynı sabiti
+# paylaşır, aksi halde ikisi birbirinden sapan tahminler verir.
+WORDS_PER_MINUTE = 132
+
+
 DEFAULT_SETTINGS = {
     "last_source": "",
     "llm_provider": "gemini",
