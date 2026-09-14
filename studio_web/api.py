@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import quote
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -55,8 +57,11 @@ from app.chapters import export_all_chapters, identify_chapters, missing_render_
 from app.cost_ledger import record as record_cost, summarize_all_projects, summarize_project
 from app.export import EXPORT_BUILDERS, write_export
 from app.flashcards import (
+    add_card,
+    build_deck_anki_txt,
     create_deck,
     deck_summary,
+    delete_card,
     delete_deck,
     get_deck,
     list_decks,
@@ -1076,6 +1081,30 @@ def get_flashcard_deck(project_id: str, deck_id: str):
     return _deck_payload(deck)
 
 
+@app.get("/api/projects/{project_id}/flashcards/decks/{deck_id}/export")
+def export_flashcard_deck(project_id: str, deck_id: str):
+    """Bu destenin kartlarını gerçek Anki'ye (Dosya > İçe Aktar) içe
+    aktarılabilecek düz metin bir .txt (TSV) olarak indirir."""
+    pdir = _project_dir(project_id)
+    deck = get_deck(pdir, deck_id)
+    if deck is None:
+        raise HTTPException(404, "Deste bulunamadı.")
+    content = build_deck_anki_txt(deck)
+    display_name = f"{slugify(deck['name']) or 'deste'}-anki.txt"
+    # HTTP başlıkları latin-1 zorunlu; Türkçe karakterler (slugify onları BİLEREK
+    # korur, bkz. app.pipeline.slugify) düz filename= alanında hataya yol açar —
+    # ASCII bir yedek isim + RFC 5987 filename* ile hem eski hem yeni tarayıcı kapsanır.
+    ascii_name = display_name.encode("ascii", "ignore").decode("ascii") or "deste-anki.txt"
+    encoded_name = quote(display_name)
+    return Response(
+        content=content,
+        media_type="text/tab-separated-values",
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}",
+        },
+    )
+
+
 @app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/generate")
 def regenerate_flashcard_deck(project_id: str, deck_id: str):
     """Bu destenin kartlarını güncel slaytlardan yeniden üretir; İÇERİĞİ
@@ -1104,6 +1133,73 @@ def delete_flashcard_deck(project_id: str, deck_id: str):
     except KeyError as exc:
         raise HTTPException(404, "Deste bulunamadı.") from exc
     return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards")
+def add_flashcard(project_id: str, deck_id: str, payload: dict = Body(...)):
+    """Desteye elle yeni bir kart ekler — statik üretimin/YZ'nin kaçırdığı ya
+    da kullanıcının kendi eklemek istediği bir soruyu desteye katmak için."""
+    pdir = _project_dir(project_id)
+    front = str(payload.get("front", ""))
+    back = str(payload.get("back", ""))
+    kind = str(payload.get("kind", "basic"))
+    try:
+        card = add_card(pdir, deck_id, front, back, kind=kind)
+    except KeyError as exc:
+        raise HTTPException(404, "Deste bulunamadı.") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
+
+
+@app.patch("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}")
+def edit_flashcard(project_id: str, deck_id: str, card_id: str, payload: dict = Body(...)):
+    """Bir kartın ön/arka yüzünü elle düzeltir. Kart "manual" işaretlenir ki
+    deste kaynaktan yeniden üretildiğinde bu düzeltme ezilip kaybolmasın."""
+    pdir = _project_dir(project_id)
+    changes: dict = {}
+    if payload.get("front") is not None:
+        front = str(payload["front"]).strip()
+        if not front:
+            raise HTTPException(400, "Ön yüz boş olamaz.")
+        changes["front"] = front
+    if payload.get("back") is not None:
+        back = str(payload["back"]).strip()
+        if not back:
+            raise HTTPException(400, "Arka yüz boş olamaz.")
+        changes["back"] = back
+    if not changes:
+        raise HTTPException(400, "Değişiklik gönderilmedi.")
+    changes["manual"] = True
+    try:
+        card = update_card(pdir, deck_id, card_id, changes)
+    except KeyError as exc:
+        raise HTTPException(404, "Kart bulunamadı.") from exc
+    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
+
+
+@app.delete("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}")
+def delete_flashcard(project_id: str, deck_id: str, card_id: str):
+    pdir = _project_dir(project_id)
+    try:
+        delete_card(pdir, deck_id, card_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Kart bulunamadı.") from exc
+    return {"summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/restore")
+def restore_flashcard_schedule(project_id: str, deck_id: str, card_id: str, payload: dict = Body(...)):
+    """Bir önceki değerlendirmeyi geri almak için: istemcinin kart hakkında
+    değerlendirmeden ÖNCE sakladığı SM-2 alanlarını olduğu gibi geri yazar."""
+    pdir = _project_dir(project_id)
+    allowed = {"easeFactor", "intervalDays", "repetitions", "dueAt", "lastReviewedAt", "suspended"}
+    changes = {k: payload[k] for k in allowed if k in payload}
+    try:
+        card = update_card(pdir, deck_id, card_id, changes)
+    except KeyError as exc:
+        raise HTTPException(404, "Kart bulunamadı.") from exc
+    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
 
 
 @app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/review")

@@ -370,6 +370,11 @@ select { color-scheme: dark; }
 .anki-card-kind { color: var(--accent); font-size: 7px; text-transform: uppercase; letter-spacing: .05em; padding: 3px 7px; border-radius: 10px; background: rgba(121,239,189,.08); white-space: nowrap; }
 .anki-card-front { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .anki-card-row > small { color: var(--muted); white-space: nowrap; }
+.anki-card-row-actions { display: flex; align-items: center; gap: 6px; }
+.manual-badge { margin-left: 7px; font-style: normal; font-size: 7px; text-transform: uppercase; letter-spacing: .04em; color: var(--violet); background: rgba(146,153,255,.1); border-radius: 8px; padding: 2px 6px; }
+.anki-card-edit-row { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--accent); border-radius: 9px; background: var(--surface); }
+.anki-card-edit-row textarea { width: 100%; resize: vertical; }
+.anki-card-edit-actions { display: flex; gap: 8px; }
 
 .review-session { display: flex; flex-direction: column; align-items: center; gap: 18px; max-width: 640px; margin: auto; width: 100%; }
 .review-progress { color: var(--muted); font-size: 9px; }
@@ -385,6 +390,8 @@ select { color-scheme: dark; }
 .rating-hard { background: rgba(255,191,122,.12); border-color: rgba(255,191,122,.3); color: #ffbf7a; }
 .rating-good { background: rgba(121,239,189,.12); border-color: rgba(121,239,189,.3); color: var(--accent); }
 .rating-easy { background: rgba(146,153,255,.12); border-color: rgba(146,153,255,.3); color: var(--violet); }
+.review-footer { display: flex; align-items: center; gap: 10px; }
+kbd { margin-left: 6px; font-family: inherit; font-size: 8px; padding: 1px 5px; border-radius: 5px; border: 1px solid currentColor; opacity: .55; }
 
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-track { background: transparent; }

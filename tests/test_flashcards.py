@@ -8,8 +8,11 @@ from app.flashcards import (
     _coerce_llm_cards,
     _make_cloze_card,
     _pick_cloze_term,
+    add_card,
+    build_deck_anki_txt,
     create_deck,
     deck_summary,
+    delete_card,
     delete_deck,
     generate_deck,
     generate_llm_deck,
@@ -123,6 +126,35 @@ class GenerateDeckTests(unittest.TestCase):
 
         self.assertNotEqual(second[0]["id"], first[0]["id"])
         self.assertEqual(second[0]["repetitions"], 0)
+
+    def test_manually_added_card_survives_regeneration(self):
+        slides = self._slides()
+        first = generate_deck(slides)
+        manual_card = {
+            "id": "manual123", "kind": "basic", "sourceSlideIndex": None,
+            "front": "Elle eklenen soru", "back": "Elle eklenen cevap", "manual": True,
+            "repetitions": 2, "suspended": False,
+        }
+        first.append(manual_card)
+
+        second = generate_deck(slides, existing_cards=first)
+
+        kept = next((c for c in second if c["id"] == "manual123"), None)
+        self.assertIsNotNone(kept)
+        self.assertEqual(kept["front"], "Elle eklenen soru")
+        self.assertEqual(kept["repetitions"], 2)
+
+    def test_manually_edited_card_content_is_not_overwritten_on_regeneration(self):
+        slides = self._slides()
+        first = generate_deck(slides)
+        original_id = first[0]["id"]
+        first[0]["front"] = "Düzeltilmiş başlık"
+        first[0]["manual"] = True
+
+        second = generate_deck(slides, existing_cards=first)
+
+        edited = next(c for c in second if c["id"] == original_id)
+        self.assertEqual(edited["front"], "Düzeltilmiş başlık")
 
 
 class CoerceLlmCardsTests(unittest.TestCase):
@@ -314,6 +346,74 @@ class MultiDeckManagementTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(KeyError):
                 delete_deck(Path(tmp), "yok")
+
+    def test_add_card_appends_a_manual_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp)
+            deck = create_deck(pdir, "Deste A", "static", self._slides())
+            before = len(deck["cards"])
+
+            card = add_card(pdir, deck["id"], "Elle soru", "Elle cevap")
+
+            self.assertTrue(card["manual"])
+            self.assertEqual(card["repetitions"], 0)
+            reloaded = get_deck(pdir, deck["id"])
+            self.assertEqual(len(reloaded["cards"]), before + 1)
+
+    def test_add_card_rejects_empty_front_or_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp)
+            deck = create_deck(pdir, "Deste A", "static", self._slides())
+            with self.assertRaises(ValueError):
+                add_card(pdir, deck["id"], "", "cevap")
+
+    def test_add_card_unknown_deck_raises_key_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(KeyError):
+                add_card(Path(tmp), "yok", "soru", "cevap")
+
+    def test_delete_card_removes_it_from_the_deck(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp)
+            deck = create_deck(pdir, "Deste A", "static", self._slides())
+            card_id = deck["cards"][0]["id"]
+
+            delete_card(pdir, deck["id"], card_id)
+
+            reloaded = get_deck(pdir, deck["id"])
+            self.assertNotIn(card_id, [c["id"] for c in reloaded["cards"]])
+
+    def test_delete_unknown_card_raises_key_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp)
+            deck = create_deck(pdir, "Deste A", "static", self._slides())
+            with self.assertRaises(KeyError):
+                delete_card(pdir, deck["id"], "yok")
+
+
+class BuildDeckAnkiTxtTests(unittest.TestCase):
+    def test_produces_a_tsv_header_and_one_row_per_card(self):
+        deck = {"cards": [
+            {"front": "Soru 1", "back": "Cevap 1"},
+            {"front": "Soru 2", "back": "Cevap 2"},
+        ]}
+        text = build_deck_anki_txt(deck)
+        lines = text.strip("\n").split("\n")
+        self.assertEqual(lines[0], "Front\tBack")
+        self.assertEqual(lines[1], "Soru 1\tCevap 1")
+        self.assertEqual(lines[2], "Soru 2\tCevap 2")
+
+    def test_skips_cards_missing_front_or_back(self):
+        deck = {"cards": [{"front": "", "back": "Cevap"}, {"front": "Soru", "back": "Cevap"}]}
+        text = build_deck_anki_txt(deck)
+        self.assertEqual(text.strip("\n").split("\n"), ["Front\tBack", "Soru\tCevap"])
+
+    def test_neutralizes_tabs_and_newlines_inside_fields(self):
+        deck = {"cards": [{"front": "Soru\twith tab", "back": "Line1\nLine2"}]}
+        text = build_deck_anki_txt(deck)
+        row = text.strip("\n").split("\n")[1]
+        self.assertEqual(row.count("\t"), 1)
+        self.assertIn("<br>", row)
 
 
 class DeckSummaryTests(unittest.TestCase):

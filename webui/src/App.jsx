@@ -12,6 +12,8 @@ import {
   Clapperboard,
   Clock3,
   Copy,
+  Download,
+  ExternalLink,
   FileText,
   FolderOpen,
   GripVertical,
@@ -22,6 +24,7 @@ import {
   LoaderCircle,
   Mic2,
   MonitorPlay,
+  Pencil,
   Plus,
   RefreshCw,
   Save,
@@ -190,6 +193,12 @@ export default function App() {
   const [reviewCard, setReviewCard] = useState(null)
   const [reviewRevealed, setReviewRevealed] = useState(false)
   const [reviewedCount, setReviewedCount] = useState(0)
+  const [reviewUndo, setReviewUndo] = useState(null)
+  const [editingCardId, setEditingCardId] = useState(null)
+  const [editDraft, setEditDraft] = useState({ front: '', back: '' })
+  const [showAddCard, setShowAddCard] = useState(false)
+  const [newCardFront, setNewCardFront] = useState('')
+  const [newCardBack, setNewCardBack] = useState('')
   const [pronunciationEntries, setPronunciationEntries] = useState([])
   const [newTerm, setNewTerm] = useState('')
   const [newPhonetic, setNewPhonetic] = useState('')
@@ -566,16 +575,19 @@ export default function App() {
     setReviewCard(due[0])
     setReviewRevealed(false)
     setReviewedCount(0)
+    setReviewUndo(null)
   }
 
   const endReviewSession = () => {
     setReviewQueue([])
     setReviewCard(null)
     setReviewRevealed(false)
+    setReviewUndo(null)
   }
 
   const submitReviewRating = async (rating) => {
     if (!project || !activeDeck || !reviewCard) return
+    const undoSnapshot = { card: reviewCard, queue: reviewQueue, count: reviewedCount }
     try {
       const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${reviewCard.id}/review`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }),
@@ -585,17 +597,112 @@ export default function App() {
         cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
         summary: data.summary,
       }))
+      setReviewUndo(undoSnapshot)
       setReviewedCount((count) => count + 1)
       if (reviewQueue.length) {
         setReviewCard(reviewQueue[0])
         setReviewQueue(reviewQueue.slice(1))
         setReviewRevealed(false)
       } else {
-        endReviewSession()
+        setReviewCard(null)
+        setReviewRevealed(false)
       }
     } catch (error) {
       setToast({ type: 'error', text: error.message })
     }
+  }
+
+  const undoLastReview = async () => {
+    if (!project || !activeDeck || !reviewUndo) return
+    const { card, queue, count } = reviewUndo
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${card.id}/restore`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          easeFactor: card.easeFactor, intervalDays: card.intervalDays, repetitions: card.repetitions,
+          dueAt: card.dueAt, lastReviewedAt: card.lastReviewedAt, suspended: card.suspended,
+        }),
+      })
+      setActiveDeck((current) => ({
+        ...current,
+        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
+        summary: data.summary,
+      }))
+      setReviewCard(card)
+      setReviewQueue(queue)
+      setReviewedCount(count)
+      setReviewRevealed(false)
+      setReviewUndo(null)
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const startEditCard = (card) => {
+    setEditingCardId(card.id)
+    setEditDraft({ front: card.front, back: card.back })
+  }
+
+  const cancelEditCard = () => {
+    setEditingCardId(null)
+    setEditDraft({ front: '', back: '' })
+  }
+
+  const saveEditCard = async () => {
+    if (!project || !activeDeck || !editingCardId) return
+    if (!editDraft.front.trim() || !editDraft.back.trim()) return
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${editingCardId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ front: editDraft.front.trim(), back: editDraft.back.trim() }),
+      })
+      setActiveDeck((current) => ({
+        ...current,
+        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
+        summary: data.summary,
+      }))
+      cancelEditCard()
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const addManualCard = async () => {
+    if (!project || !activeDeck) return
+    if (!newCardFront.trim() || !newCardBack.trim()) return
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ front: newCardFront.trim(), back: newCardBack.trim() }),
+      })
+      setActiveDeck((current) => ({ ...current, cards: [...current.cards, data.card], summary: data.summary }))
+      setNewCardFront('')
+      setNewCardBack('')
+      setShowAddCard(false)
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const deleteFlashcardCard = async (cardId) => {
+    if (!project || !activeDeck) return
+    try {
+      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${cardId}`, { method: 'DELETE' })
+      setActiveDeck((current) => ({
+        ...current,
+        cards: current.cards.filter((c) => c.id !== cardId),
+        summary: data.summary,
+      }))
+    } catch (error) {
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const goToCardSource = (card) => {
+    if (card.sourceSlideIndex === null || card.sourceSlideIndex === undefined) return
+    setView('video')
+    setStage('script')
+    setSelectedSlide(card.sourceSlideIndex)
   }
 
   const toggleCardSuspend = async (card) => {
@@ -747,6 +854,30 @@ export default function App() {
     const timer = setTimeout(() => setToast(null), 5000)
     return () => clearTimeout(timer)
   }, [toast])
+
+  useEffect(() => {
+    if (!reviewCard) return undefined
+    const onKeyDown = (event) => {
+      const tag = event.target.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      if ((event.key === 'z' || event.key === 'Z') && reviewUndo) { undoLastReview(); return }
+      if (!reviewRevealed) {
+        if (event.code === 'Space' || event.key === 'Enter') { event.preventDefault(); setReviewRevealed(true) }
+        return
+      }
+      if (event.key === '1') submitReviewRating('again')
+      else if (event.key === '2') submitReviewRating('hard')
+      else if (event.key === '3') submitReviewRating('good')
+      else if (event.key === '4') submitReviewRating('easy')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [reviewCard, reviewRevealed, reviewUndo])
+
+  useEffect(() => {
+    if (view !== 'video' || stage !== 'script' || selectedSlide === null) return
+    document.getElementById(`slide-${selectedSlide}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [view, stage, selectedSlide])
 
   const completion = useMemo(() => {
     if (!project) return 0
@@ -1205,6 +1336,7 @@ export default function App() {
         {!project?.slides.length ? <EmptyState icon={Layers3} title="Anlatı henüz boş">Seçili bölümlerden ilk slayt setini üret.</EmptyState> : <div className="slide-list">
           {project.slides.map((slide, index) => <article
             key={`${slide.title}-${index}`}
+            id={`slide-${index}`}
             className={`slide-card ${selectedSlide === index ? 'active' : ''}`}
             draggable
             onDragStart={() => setDraggedSlide(index)}
@@ -1512,19 +1644,50 @@ export default function App() {
                     <RefreshCw size={16} /> Kaynaktan yeniden oluştur
                   </button>
                 )}
+                <a className="button ghost" href={`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/export`}>
+                  <Download size={16} /> Anki'ye Aktar (.txt)
+                </a>
               </div>
               <div className="anki-card-list">
-                {activeDeck.cards.map((card) => (
+                {activeDeck.cards.map((card) => editingCardId === card.id ? (
+                  <div key={card.id} className="anki-card-edit-row">
+                    <textarea rows="2" value={editDraft.front} onChange={(e) => setEditDraft({ ...editDraft, front: e.target.value })} placeholder="Ön yüz" />
+                    <textarea rows="2" value={editDraft.back} onChange={(e) => setEditDraft({ ...editDraft, back: e.target.value })} placeholder="Arka yüz" />
+                    <div className="anki-card-edit-actions">
+                      <button className="button primary compact" onClick={saveEditCard} disabled={!editDraft.front.trim() || !editDraft.back.trim()}>Kaydet</button>
+                      <button className="button ghost compact" onClick={cancelEditCard}>İptal</button>
+                    </div>
+                  </div>
+                ) : (
                   <div key={card.id} className={`anki-card-row ${card.suspended ? 'suspended' : ''}`}>
                     <span className="anki-card-kind">{card.kind === 'cloze' ? 'Boşluk' : 'Temel'}</span>
-                    <span className="anki-card-front">{card.front}</span>
+                    <span className="anki-card-front">{card.front}{card.manual && <em className="manual-badge">elle</em>}</span>
                     <small>{card.repetitions === 0 ? 'yeni' : `${card.repetitions} tekrar`}</small>
-                    <button className="button quiet compact" onClick={() => toggleCardSuspend(card)}>
-                      {card.suspended ? 'Aktif et' : 'Askıya al'}
-                    </button>
+                    <span className="anki-card-row-actions">
+                      {card.sourceSlideIndex !== null && card.sourceSlideIndex !== undefined && (
+                        <button className="icon-button" title="Kaynağa git" onClick={() => goToCardSource(card)}><ExternalLink size={13} /></button>
+                      )}
+                      <button className="icon-button" title="Düzenle" onClick={() => startEditCard(card)}><Pencil size={13} /></button>
+                      <button className="icon-button danger" title="Kartı sil" onClick={() => deleteFlashcardCard(card.id)}><Trash2 size={13} /></button>
+                      <button className="button quiet compact" onClick={() => toggleCardSuspend(card)}>
+                        {card.suspended ? 'Aktif et' : 'Askıya al'}
+                      </button>
+                    </span>
                   </div>
                 ))}
               </div>
+              {showAddCard ? (
+                <div className="anki-card-edit-row">
+                  <textarea rows="2" value={newCardFront} onChange={(e) => setNewCardFront(e.target.value)} placeholder="Ön yüz" />
+                  <textarea rows="2" value={newCardBack} onChange={(e) => setNewCardBack(e.target.value)} placeholder="Arka yüz" />
+                  <div className="anki-card-edit-actions">
+                    <button className="button primary compact" onClick={addManualCard} disabled={!newCardFront.trim() || !newCardBack.trim()}>Kartı Ekle</button>
+                    <button className="button ghost compact" onClick={() => { setShowAddCard(false); setNewCardFront(''); setNewCardBack('') }}>İptal</button>
+                  </div>
+                </div>
+              ) : (
+                <button className="button ghost compact" onClick={() => setShowAddCard(true)}><Plus size={14} /> Elle Kart Ekle</button>
+              )}
             </div>
           </>
         ) : (
@@ -1536,16 +1699,19 @@ export default function App() {
               {reviewRevealed && <><hr /><p className="review-back">{reviewCard.back}</p></>}
             </div>
             {!reviewRevealed ? (
-              <button className="button primary review-reveal" onClick={() => setReviewRevealed(true)}>Cevabı Göster</button>
+              <button className="button primary review-reveal" onClick={() => setReviewRevealed(true)}>Cevabı Göster <kbd>Boşluk</kbd></button>
             ) : (
               <div className="review-ratings">
-                <button className="button rating-again" onClick={() => submitReviewRating('again')}>Tekrar</button>
-                <button className="button rating-hard" onClick={() => submitReviewRating('hard')}>Zor</button>
-                <button className="button rating-good" onClick={() => submitReviewRating('good')}>İyi</button>
-                <button className="button rating-easy" onClick={() => submitReviewRating('easy')}>Kolay</button>
+                <button className="button rating-again" onClick={() => submitReviewRating('again')}>Tekrar <kbd>1</kbd></button>
+                <button className="button rating-hard" onClick={() => submitReviewRating('hard')}>Zor <kbd>2</kbd></button>
+                <button className="button rating-good" onClick={() => submitReviewRating('good')}>İyi <kbd>3</kbd></button>
+                <button className="button rating-easy" onClick={() => submitReviewRating('easy')}>Kolay <kbd>4</kbd></button>
               </div>
             )}
-            <button className="button quiet" onClick={endReviewSession}>Oturumu bitir</button>
+            <div className="review-footer">
+              {reviewUndo && <button className="button ghost compact" onClick={undoLastReview}>Geri Al <kbd>Z</kbd></button>}
+              <button className="button quiet" onClick={endReviewSession}>Oturumu bitir</button>
+            </div>
           </div>
         )}
         {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}

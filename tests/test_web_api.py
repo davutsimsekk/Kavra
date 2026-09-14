@@ -826,6 +826,151 @@ class FlashcardDeckEndpointTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 404)
 
+    def test_export_returns_anki_compatible_tsv(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name, name="Sınav Öncesi").json()
+            response = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/export")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("attachment", response.headers["content-disposition"])
+            self.assertIn(".txt", response.headers["content-disposition"])
+            body = response.text
+            self.assertTrue(body.startswith("Front\tBack"))
+            self.assertEqual(len(body.strip("\n").split("\n")) - 1, len(deck["cards"]))
+
+    def test_export_unknown_deck_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks/yok/export")
+            self.assertEqual(response.status_code, 404)
+
+    def test_add_card_appends_a_manual_card(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            before = len(deck["cards"])
+
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"front": "Elle soru", "back": "Elle cevap"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["card"]["manual"])
+
+            reloaded = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}").json()
+            self.assertEqual(len(reloaded["cards"]), before + 1)
+
+    def test_add_card_rejects_empty_front(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"front": "", "back": "cevap"},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_add_card_unknown_deck_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/yok/cards",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"front": "a", "back": "b"},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_edit_card_updates_front_and_marks_manual(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
+
+            response = self.client.patch(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"front": "Düzeltilmiş"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["card"]["front"], "Düzeltilmiş")
+            self.assertTrue(response.json()["card"]["manual"])
+
+    def test_edit_card_rejects_empty_front(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
+            response = self.client.patch(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"front": "  "},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_edit_card_rejects_no_changes(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
+            response = self.client.patch(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_edit_unknown_card_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            response = self.client.patch(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/yok",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"front": "x"},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_delete_card_removes_it(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
+
+            response = self.client.delete(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            )
+            self.assertEqual(response.status_code, 200)
+
+            reloaded = self.client.get(f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}").json()
+            self.assertNotIn(card_id, [c["id"] for c in reloaded["cards"]])
+
+    def test_delete_unknown_card_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            response = self.client.delete(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/yok",
+                headers={"Origin": "http://127.0.0.1:5173"},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_restore_reverts_scheduling_fields_after_a_review(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            card_id = deck["cards"][0]["id"]
+            original = deck["cards"][0]
+
+            self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}/review",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={"rating": "good"},
+            )
+
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/{card_id}/restore",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={
+                    "easeFactor": original["easeFactor"], "intervalDays": original["intervalDays"],
+                    "repetitions": original["repetitions"], "dueAt": original["dueAt"],
+                    "lastReviewedAt": original["lastReviewedAt"], "suspended": original["suspended"],
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["card"]["repetitions"], 0)
+
+    def test_restore_unknown_card_is_404(self):
+        with _temp_project([self._slide()]) as pdir:
+            deck = self._create_deck(pdir.name).json()
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/flashcards/decks/{deck['id']}/cards/yok/restore",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={},
+            )
+            self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

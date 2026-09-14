@@ -134,13 +134,23 @@ def _candidate_cards(slides: list[Slide]) -> list[dict[str, Any]]:
 
 def generate_deck(slides: list[Slide], existing_cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Slaytlardan taze bir aday kart listesi üretir; içerik değişmemiş kartlar
-    için var olan aralıklı-tekrar ilerlemesini (existing_cards) korur.
+    için var olan aralıklı-tekrar ilerlemesini (existing_cards) korur. Elle
+    eklenmiş ya da elle düzenlenmiş kartlar ("manual": True — bkz. add_card /
+    edit_card kullanan API uçları) hiçbir aday ile eşleşmese bile OLDUĞU GİBİ
+    korunur; aksi halde kullanıcının elle yaptığı bir düzeltme sessizce kaybolurdu.
     """
     existing_by_id = {c["id"]: c for c in (existing_cards or [])}
+    used_manual_ids: set[str] = set()
     deck: list[dict[str, Any]] = []
     for candidate in _candidate_cards(slides):
         card_id = _card_id(candidate["kind"], candidate["sourceSlideIndex"], candidate["front"])
         previous = existing_by_id.get(card_id)
+        if previous and previous.get("manual"):
+            # Kullanıcı bu kartı elle düzenlemiş — içeriğini YENİDEN ÜRETİP
+            # ezme, olduğu gibi koru (id eşleşmesi sadece "bu hangi kart"ı bulmak için).
+            deck.append(previous)
+            used_manual_ids.add(card_id)
+            continue
         if previous:
             schedule = {
                 "easeFactor": previous.get("easeFactor"),
@@ -153,6 +163,11 @@ def generate_deck(slides: list[Slide], existing_cards: list[dict[str, Any]] | No
         else:
             schedule = {**new_card_state(), "suspended": False}
         deck.append({"id": card_id, **candidate, **schedule})
+    # Saf elle eklenmiş kartlar (hiçbir adayla hiç eşleşmeyen) ya da kaynağı
+    # silinmiş bir slayttan düzenlenmiş kartlar — olduğu gibi korunur.
+    for card in existing_cards or []:
+        if card.get("manual") and card["id"] not in used_manual_ids:
+            deck.append(card)
     return deck
 
 
@@ -275,6 +290,26 @@ def deck_summary(cards: list[dict[str, Any]], now: float | None = None) -> dict[
     }
 
 
+def build_deck_anki_txt(deck: dict[str, Any]) -> str:
+    """Bu destenin kartlarını gerçek Anki'ye (Dosya > İçe Aktar) yüklenebilecek
+    düz metin TSV'ye çevirir — iki sütun (Front/Back), Anki'nin varsayılan
+    "Temel" not tipiyle bire bir uyumlu. Bir alan içindeki tab/yeni satır
+    Anki'nin içe aktarıcısında sütun/satır sonu sayılır; ikisi de nötrlenir.
+    """
+
+    def field(text: str) -> str:
+        return _clean(text).replace("\t", " ").replace("\r\n", "<br>").replace("\n", "<br>")
+
+    rows = ["Front\tBack"]
+    for card in deck.get("cards", []):
+        front = field(card.get("front", ""))
+        back = field(card.get("back", ""))
+        if not front or not back:
+            continue
+        rows.append(f"{front}\t{back}")
+    return "\n".join(rows) + "\n"
+
+
 def _decks_dir(pdir: Path) -> Path:
     return pdir / FLASHCARDS_DIR_NAME
 
@@ -370,6 +405,43 @@ def update_card(pdir: Path, deck_id: str, card_id: str, changes: dict[str, Any])
     card.update(changes)
     _save_deck_file(pdir, deck)
     return card
+
+
+def add_card(pdir: Path, deck_id: str, front: str, back: str, kind: str = "basic") -> dict[str, Any]:
+    """Bir desteye elle yeni bir kart ekler (statik ya da YZ destesi fark etmez).
+    Elle eklenen kartlar "manual": True ile işaretlenir — bkz. generate_deck'in
+    manual-kart koruma mantığı: bu kartlar kaynak slaytlardaki hiçbir adayla
+    eşleşmediği için, işaretlenmezse deste kaynaktan yeniden üretildiğinde
+    sessizce kaybolurlardı.
+    """
+    deck = get_deck(pdir, deck_id)
+    if deck is None:
+        raise KeyError(deck_id)
+    front = _clean(front)
+    back = _clean(back)
+    if not front or not back:
+        raise ValueError("Kartın ön ve arka yüzü boş olamaz.")
+    if kind not in _LLM_CARD_KINDS:
+        kind = "basic"
+    card = {
+        "id": uuid.uuid4().hex[:16], "kind": kind, "sourceSlideIndex": None,
+        "front": front, "back": back, "manual": True,
+        **new_card_state(), "suspended": False,
+    }
+    deck["cards"].append(card)
+    _save_deck_file(pdir, deck)
+    return card
+
+
+def delete_card(pdir: Path, deck_id: str, card_id: str) -> None:
+    deck = get_deck(pdir, deck_id)
+    if deck is None:
+        raise KeyError(deck_id)
+    before = len(deck["cards"])
+    deck["cards"] = [c for c in deck["cards"] if c["id"] != card_id]
+    if len(deck["cards"]) == before:
+        raise KeyError(card_id)
+    _save_deck_file(pdir, deck)
 
 
 def delete_deck(pdir: Path, deck_id: str) -> None:
