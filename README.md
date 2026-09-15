@@ -38,7 +38,7 @@ venv/Scripts/python.exe gui/app_gui.py
    - **Manuel (herhangi bir LLM ile):** **Prompt'u Panoya Kopyala** → istediğin bir sohbet arayüzüne (Gemini web, ChatGPT, Claude...) yapıştır → dönen JSON'u bir dosyaya kaydet → **Manuel JSON Dosyası Yükle**.
    - Otomatik sağlayıcılarda **Tek istekte gönder** kutusunu işaretlersen seçili kaynak bölümlerinin tamamı tek LLM çağrısında işlenir. Tek çağrıda `session/resume` gerekmediği için bu ayarlar otomatik olarak devre dışı kalır. İşaretlemezsen **bir LLM çağrısındaki kaynak bölümü** ayarı, PDF/PPT'den aynı çağrıya en fazla kaç bölüm konacağını belirler; bu üretilen slayt sayısı değildir. Claude session seçeneği açıksa bu ayrı çağrıların tamamı `--resume` ile aynı mantıksal konuşmada devam eder.
    - Gemini ve OpenAI uyumlu API çağrıları sunucu tarafında oturum tutmaz. Uygulama bu nedenle her parçaya önceki slayt başlıkları ile son slaytların kısa özetinden oluşan kompakt bir **ders hafızası** ekler. Daha önce elle düzenlediğin veya kaydettiğin slaytlar da bu hafızaya dahildir; böylece API parçaları terminoloji ve akış bakımından birbirinden kopmaz.
-   - Üretilen slaytları düzenleyebilir, silebilir, yenisini seçili slayttan sonra ekleyebilir ve **Yukarı / Aşağı** düğmeleriyle sıralayabilirsin. Yeni üretimi listenin sonuna veya seçili slayttan hemen sonraya yerleştirebilirsin. İlerleme çubuğu o anki parçayı gösterir; başarıyla biten her parça ve yaptığın düzenlemeler anında `script.json` dosyasına kaydedilir.
+   - Üretilen slaytları düzenleyebilir, silebilir, yenisini seçili slayttan sonra ekleyebilir ve **Yukarı / Aşağı** düğmeleriyle sıralayabilirsin. Yeni üretimi listenin sonuna veya seçili slayttan hemen sonraya yerleştirebilirsin. İlerleme çubuğu o anki parçayı gösterir; başarıyla biten her parça `script.json` dosyasına kaydedilir. Elle yapılan düzenlemeler Kaydet ile diske yazılır.
    - **Kaldığı yerden devam et** açıkken her başarılı LLM çağrısının kaynak parmak izleri `generation_checkpoint.json` dosyasına yazılır. Kota/timeout/uygulama kapanması sonrası aynı bölümler yeniden gönderilmez; yalnızca kalanlar üretilir. Claude session kimliği de aynı komut için saklanır. Kaynak metni değişirse parmak izi değiştiği için o bölüm otomatik olarak yeniden bekleyen duruma döner. Bilerek tekrar üretmek için resume'u kapatabilir veya yalnızca ilerleme işaretlerini sıfırlayabilirsin; mevcut slaytlar silinmez.
    - **Script'i Kaydet** ile `projects/<proje>/script.json` dosyasına yazılır (istersen elle de düzenleyebilirsin, düz JSON).
 3. **3. Ses ve Video** sekmesi: TTS sağlayıcısını ve sesi seç; görsel tema, altyazı, geçiş ve yakınlaştırma seçeneklerini ayarla; **Videoyu Oluştur**. **Temayı Önizle** ile video üretmeden önce seçili slaydın görünümünü kontrol edebilirsin. Bitince **Videoyu Oynat** veya **Çıktı Klasörünü Aç**.
@@ -52,8 +52,10 @@ Her slayt için üretilen ses/görüntü/segment `projects/<proje>/assets/` alt�
 - Agent/Gemini/OpenAI ayarları, ders hafızası ve canlı iş ilerlemesi
 - Sürükle-bırak slayt sıralama, araya ekleme, silme ve ayrıntılı master-detail editör
 - Yedi tema, gerçek render önizlemesi, TTS/effect ayarları ve video oynatıcı
-- Three.js ile düşük yoğunluklu, `prefers-reduced-motion` uyumlu görsel arka plan
-- Coqui seçildiğinde GPU/VRAM yarışını önlemek için WebGL otomatik kapanır ve CSS arka plana geçer.
+- Açık / koyu / sistem teması; görünüm tercihi cihazda hatırlanır. WebGL ve 3D arka plan kullanılmaz.
+- Telefon, tablet ve masaüstüne uyarlanan proje kitaplığı; proje, kaynak bölümü, slayt ve deste araması.
+- Anlatı ayarları ve PDF seçenekleri açılır panellerde; düzenleyici anlatım metnine öncelik verir.
+- Slayt düzenlemeleri Kaydet veya Ctrl+S ile diske yazılır. Kaydedilmemiş taslaklar tarayıcıda korunur; hatalı kayıt başarılı gösterilmez.
 - API anahtarları tarayıcıya geri gönderilmez; yalnızca yapılandırılmış olup olmadıkları gösterilir.
 - `.env` Git tarafından yok sayılır. Kayıtlı bir uzak API anahtarı localhost LLM endpoint'lerine otomatik olarak gönderilmez.
 - `run_gui.bat`, bu arayüzü ayrı bir masaüstü uygulama penceresinde açar; resume, OpenRouter, slayt editörü, tema önizlemesi ve izole TTS/render davranışı web ile masaüstünde birebir aynıdır.
@@ -114,3 +116,7 @@ ders_video/
   run_gui.bat           modern masaüstü uygulamasını çift tıkla başlat
   run_legacy_gui.bat    eski Tkinter arayüzünü başlat
 ```
+
+## Gelişmiş flashcard çalışma masası
+
+Flashcard bölümüne günlük limitler, dakika bazlı öğrenme, kalıcı geri al, çoklu boşluk/ters kart, etiketli kart tarayıcısı, istatistikler ve TSV içe aktarma eklendi. Kullanım, kısayollar ve Anki ile farklar için [FLASHCARD_GUIDE.md](FLASHCARD_GUIDE.md) dosyasına bak.

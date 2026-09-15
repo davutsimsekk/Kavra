@@ -1,4 +1,6 @@
 import tempfile
+import csv
+import io
 import unittest
 from pathlib import Path
 
@@ -392,28 +394,30 @@ class MultiDeckManagementTests(unittest.TestCase):
 
 
 class BuildDeckAnkiTxtTests(unittest.TestCase):
-    def test_produces_a_tsv_header_and_one_row_per_card(self):
-        deck = {"cards": [
-            {"front": "Soru 1", "back": "Cevap 1"},
+    def rows(self, text):
+        return [row for row in csv.reader(io.StringIO(text), delimiter="\t")
+                if row and not row[0].startswith("#")]
+
+    def test_headers_are_not_imported_as_cards_and_tags_are_mapped(self):
+        text = build_deck_anki_txt({"cards": [
+            {"front": "Soru 1", "back": "Cevap 1", "tags": ["konu"]},
             {"front": "Soru 2", "back": "Cevap 2"},
-        ]}
-        text = build_deck_anki_txt(deck)
-        lines = text.strip("\n").split("\n")
-        self.assertEqual(lines[0], "Front\tBack")
-        self.assertEqual(lines[1], "Soru 1\tCevap 1")
-        self.assertEqual(lines[2], "Soru 2\tCevap 2")
+        ]})
+        self.assertIn("#tags column:3", text)
+        self.assertIn("#html:false", text)
+        self.assertEqual(self.rows(text), [["Soru 1", "Cevap 1", "konu"], ["Soru 2", "Cevap 2", ""]])
 
     def test_skips_cards_missing_front_or_back(self):
-        deck = {"cards": [{"front": "", "back": "Cevap"}, {"front": "Soru", "back": "Cevap"}]}
-        text = build_deck_anki_txt(deck)
-        self.assertEqual(text.strip("\n").split("\n"), ["Front\tBack", "Soru\tCevap"])
+        text = build_deck_anki_txt({"cards": [
+            {"front": "", "back": "Cevap"}, {"front": "Soru", "back": "Cevap"},
+        ]})
+        self.assertEqual(self.rows(text), [["Soru", "Cevap", ""]])
 
-    def test_neutralizes_tabs_and_newlines_inside_fields(self):
-        deck = {"cards": [{"front": "Soru\twith tab", "back": "Line1\nLine2"}]}
-        text = build_deck_anki_txt(deck)
-        row = text.strip("\n").split("\n")[1]
-        self.assertEqual(row.count("\t"), 1)
-        self.assertIn("<br>", row)
+    def test_preserves_tabs_multiline_code_and_quotes(self):
+        text = build_deck_anki_txt({"cards": [
+            {"front": "Soru\twith tab", "back": 'Line1\n#include <x> & "value"'},
+        ]})
+        self.assertEqual(self.rows(text)[0], ["Soru\twith tab", 'Line1\n#include <x> & "value"', ""])
 
 
 class DeckSummaryTests(unittest.TestCase):

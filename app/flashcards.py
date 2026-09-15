@@ -25,16 +25,32 @@ olmadığından (model her seferinde farklı kartlar üretebilir) yeniden üretm
 from __future__ import annotations
 
 import hashlib
+import csv
+import io
 import json
 import re
 import time
 import uuid
+import threading
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from app.llm.base import extract_json_array
 from app.models import Slide
-from app.spaced_repetition import new_card_state
+from app.spaced_repetition import new_card_state, card_state
+
+_DECK_LOCK = threading.RLock()
+
+
+def synchronized(function):
+    """Serialize read-modify-write operations in the local API process."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        with _DECK_LOCK:
+            return function(*args, **kwargs)
+    return guarded
+
 
 FLASHCARDS_DIR_NAME = "flashcards"
 DECK_KINDS = {"static", "llm"}
@@ -152,14 +168,7 @@ def generate_deck(slides: list[Slide], existing_cards: list[dict[str, Any]] | No
             used_manual_ids.add(card_id)
             continue
         if previous:
-            schedule = {
-                "easeFactor": previous.get("easeFactor"),
-                "intervalDays": previous.get("intervalDays"),
-                "repetitions": previous.get("repetitions"),
-                "dueAt": previous.get("dueAt"),
-                "lastReviewedAt": previous.get("lastReviewedAt"),
-                "suspended": previous.get("suspended", False),
-            }
+            schedule = {k: v for k, v in previous.items() if k not in candidate and k != "id"}
         else:
             schedule = {**new_card_state(), "suspended": False}
         deck.append({"id": card_id, **candidate, **schedule})
@@ -280,7 +289,7 @@ def deck_summary(cards: list[dict[str, Any]], now: float | None = None) -> dict[
     now = time.time() if now is None else now
     active = [c for c in cards if not c.get("suspended")]
     due = [c for c in active if c.get("dueAt", 0) <= now]
-    new = [c for c in active if c.get("repetitions", 0) == 0]
+    new = [c for c in active if card_state(c) == "new"]
     return {
         "totalCards": len(cards),
         "activeCards": len(active),
@@ -291,23 +300,19 @@ def deck_summary(cards: list[dict[str, Any]], now: float | None = None) -> dict[
 
 
 def build_deck_anki_txt(deck: dict[str, Any]) -> str:
-    """Bu destenin kartlarını gerçek Anki'ye (Dosya > İçe Aktar) yüklenebilecek
-    düz metin TSV'ye çevirir — iki sütun (Front/Back), Anki'nin varsayılan
-    "Temel" not tipiyle bire bir uyumlu. Bir alan içindeki tab/yeni satır
-    Anki'nin içe aktarıcısında sütun/satır sonu sayılır; ikisi de nötrlenir.
+    """Anki Basic import with explicit headers, tags and lossless CSV quoting.
+
+    All cards, including cloze prompts, are exported as question/answer pairs.
+    Scheduling and media are deliberately outside this plain-text format.
     """
-
-    def field(text: str) -> str:
-        return _clean(text).replace("\t", " ").replace("\r\n", "<br>").replace("\n", "<br>")
-
-    rows = ["Front\tBack"]
+    output = io.StringIO(newline="")
+    output.write("#separator:Tab\n#html:false\n#columns:Front\tBack\tTags\n#tags column:3\n")
+    writer = csv.writer(output, delimiter="\t", lineterminator="\n", quoting=csv.QUOTE_ALL)
     for card in deck.get("cards", []):
-        front = field(card.get("front", ""))
-        back = field(card.get("back", ""))
-        if not front or not back:
-            continue
-        rows.append(f"{front}\t{back}")
-    return "\n".join(rows) + "\n"
+        front, back = _clean(card.get("front", "")), _clean(card.get("back", ""))
+        if front and back:
+            writer.writerow([front, back, " ".join(card.get("tags", []))])
+    return output.getvalue()
 
 
 def _decks_dir(pdir: Path) -> Path:
@@ -315,6 +320,8 @@ def _decks_dir(pdir: Path) -> Path:
 
 
 def _deck_path(pdir: Path, deck_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", deck_id):
+        raise ValueError("Geçersiz deste kimliği.")
     return _decks_dir(pdir) / f"{deck_id}.json"
 
 
@@ -378,6 +385,7 @@ def create_deck(pdir: Path, name: str, kind: str, slides: list[Slide], *,
     return deck
 
 
+@synchronized
 def regenerate_deck_cards(pdir: Path, deck_id: str, slides: list[Slide]) -> dict[str, Any]:
     """Bir destenin kartlarını güncel slaytlardan yeniden üretir; içeriği
     değişmemiş kartların aralıklı-tekrar ilerlemesi korunur (bkz. generate_deck).
@@ -393,6 +401,7 @@ def regenerate_deck_cards(pdir: Path, deck_id: str, slides: list[Slide]) -> dict
     return deck
 
 
+@synchronized
 def update_card(pdir: Path, deck_id: str, card_id: str, changes: dict[str, Any]) -> dict[str, Any]:
     """Bir destedeki tek bir kartı günceller (inceleme sonrası zamanlama ya da
     askıya alma) ve tüm desteyi kaydeder. Kart bulunamazsa KeyError fırlatır."""
@@ -407,6 +416,7 @@ def update_card(pdir: Path, deck_id: str, card_id: str, changes: dict[str, Any])
     return card
 
 
+@synchronized
 def add_card(pdir: Path, deck_id: str, front: str, back: str, kind: str = "basic") -> dict[str, Any]:
     """Bir desteye elle yeni bir kart ekler (statik ya da YZ destesi fark etmez).
     Elle eklenen kartlar "manual": True ile işaretlenir — bkz. generate_deck'in
@@ -433,6 +443,7 @@ def add_card(pdir: Path, deck_id: str, front: str, back: str, kind: str = "basic
     return card
 
 
+@synchronized
 def delete_card(pdir: Path, deck_id: str, card_id: str) -> None:
     deck = get_deck(pdir, deck_id)
     if deck is None:
@@ -444,6 +455,7 @@ def delete_card(pdir: Path, deck_id: str, card_id: str) -> None:
     _save_deck_file(pdir, deck)
 
 
+@synchronized
 def delete_deck(pdir: Path, deck_id: str) -> None:
     path = _deck_path(pdir, deck_id)
     if not path.exists():

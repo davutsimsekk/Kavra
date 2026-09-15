@@ -23,34 +23,36 @@ class NewCardStateTests(unittest.TestCase):
 
 
 class ScheduleReviewTests(unittest.TestCase):
-    def test_again_resets_repetitions_and_schedules_for_tomorrow(self):
+    def test_again_starts_ten_minute_relearning(self):
         card = {"easeFactor": 2.5, "intervalDays": 20.0, "repetitions": 4}
         now = 1_000_000.0
 
         result = schedule_review(card, RATING_AGAIN, now=now)
 
-        self.assertEqual(result["repetitions"], 0)
-        self.assertEqual(result["intervalDays"], 1.0)
-        self.assertEqual(result["dueAt"], now + 86_400)
+        self.assertEqual(result["repetitions"], 5)
+        self.assertEqual(result["state"], "relearning")
+        self.assertEqual(result["lapses"], 1)
+        self.assertEqual(result["dueAt"], now + 600)
 
-    def test_first_good_review_schedules_one_day_out(self):
+    def test_first_good_advances_to_ten_minute_learning_step(self):
         card = new_card_state()
         now = 1_000_000.0
 
         result = schedule_review(card, RATING_GOOD, now=now)
 
         self.assertEqual(result["repetitions"], 1)
-        self.assertEqual(result["intervalDays"], 1.0)
-        self.assertEqual(result["dueAt"], now + 86_400)
+        self.assertEqual(result["state"], "learning")
+        self.assertEqual(result["stepIndex"], 1)
+        self.assertEqual(result["dueAt"], now + 600)
 
-    def test_second_good_review_schedules_six_days_out(self):
+    def test_legacy_review_uses_existing_interval_and_ease(self):
         card = {"easeFactor": 2.5, "intervalDays": 1.0, "repetitions": 1}
         now = 1_000_000.0
 
         result = schedule_review(card, RATING_GOOD, now=now)
 
         self.assertEqual(result["repetitions"], 2)
-        self.assertEqual(result["intervalDays"], 6.0)
+        self.assertEqual(result["intervalDays"], 2.0)
 
     def test_third_and_later_good_reviews_multiply_interval_by_ease_factor(self):
         card = {"easeFactor": 2.0, "intervalDays": 6.0, "repetitions": 2}

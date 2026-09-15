@@ -834,8 +834,12 @@ class FlashcardDeckEndpointTests(unittest.TestCase):
             self.assertIn("attachment", response.headers["content-disposition"])
             self.assertIn(".txt", response.headers["content-disposition"])
             body = response.text
-            self.assertTrue(body.startswith("Front\tBack"))
-            self.assertEqual(len(body.strip("\n").split("\n")) - 1, len(deck["cards"]))
+            self.assertTrue(body.startswith("#separator:Tab"))
+            self.assertIn("#columns:Front\tBack\tTags", body)
+            import csv
+            import io
+            rows = list(csv.reader(io.StringIO(body), delimiter="\t"))
+            self.assertEqual(len(rows) - 4, len(deck["cards"]))
 
     def test_export_unknown_deck_is_404(self):
         with _temp_project([self._slide()]) as pdir:

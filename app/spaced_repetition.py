@@ -1,77 +1,116 @@
-"""SM-2 tabanlı aralıklı tekrar (spaced repetition) zamanlayıcısı.
-
-Anki'nin kendisinin de temel aldığı SuperMemo-2 algoritmasının, modern Anki'nin
-4 butonlu (Tekrar / Zor / İyi / Kolay) arayüzüne uyarlanmış hali. Dışarıdan bir
-kütüphane/servis kullanılmıyor — tamamen yerel, saf Python.
+"""Local Anki-style learning steps and SM-2-inspired intervals (not FSRS).
+Legacy due dates/ease are preserved until a card is reviewed.
 """
-
 from __future__ import annotations
-
+import math
 import time
-from typing import Any
 
-RATING_AGAIN = "again"
-RATING_HARD = "hard"
-RATING_GOOD = "good"
-RATING_EASY = "easy"
+RATING_AGAIN, RATING_HARD, RATING_GOOD, RATING_EASY = "again", "hard", "good", "easy"
 RATINGS = (RATING_AGAIN, RATING_HARD, RATING_GOOD, RATING_EASY)
-
-# SM-2'nin 0-5 kalite puanına kaba bir eşleme — Anki de dahili olarak buna benzer bir dönüşüm yapar.
-_QUALITY_BY_RATING = {RATING_AGAIN: 0, RATING_HARD: 3, RATING_GOOD: 4, RATING_EASY: 5}
-_MIN_EASE_FACTOR = 1.3
-_DEFAULT_EASE_FACTOR = 2.5
-_SECONDS_PER_DAY = 86_400
-
-
-def new_card_state() -> dict[str, Any]:
-    """Hiç incelenmemiş taze bir kartın zamanlama alanları."""
-    return {
-        "easeFactor": _DEFAULT_EASE_FACTOR,
-        "intervalDays": 0.0,
-        "repetitions": 0,
-        "dueAt": time.time(),  # hemen incelenebilir
-        "lastReviewedAt": None,
-    }
+DEFAULT_OPTIONS = {
+    "newPerDay": 20, "reviewsPerDay": 200, "learningSteps": [1, 10],
+    "relearningSteps": [10], "graduatingDays": 1, "easyDays": 4,
+    "maxIntervalDays": 36500, "dayStartsAt": 4, "burySiblings": True,
+}
+SCHEDULE_FIELDS = ("easeFactor", "intervalDays", "repetitions", "dueAt",
+                   "lastReviewedAt", "state", "stepIndex", "lapses", "reviewVersion")
 
 
-def schedule_review(card: dict[str, Any], rating: str, now: float | None = None) -> dict[str, Any]:
-    """Bir inceleme puanından sonra kartın zamanlama alanlarını günceller.
+def validate_options(values=None):
+    values = {} if values is None else values
+    if not isinstance(values, dict) or set(values) - set(DEFAULT_OPTIONS):
+        raise ValueError("Geçersiz deste ayarı.")
+    result = {**DEFAULT_OPTIONS, **values}
+    for key, maximum in (("newPerDay", 9999), ("reviewsPerDay", 9999),
+                         ("graduatingDays", 36500), ("easyDays", 36500),
+                         ("maxIntervalDays", 36500), ("dayStartsAt", 23)):
+        value = result[key]
+        minimum = 0 if key in {"newPerDay", "reviewsPerDay", "dayStartsAt"} else 1
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ValueError(f"{key}: {minimum}–{maximum} arasında tam sayı gir.")
+    for key in ("learningSteps", "relearningSteps"):
+        steps = result[key]
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 8:
+            raise ValueError("Öğrenme adımları 1–8 süre içermeli.")
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or
+               not math.isfinite(v) or not 0.1 <= v < 1440 for v in steps):
+            raise ValueError("Öğrenme adımları dakika olarak 0,1 ile 1440 arasında olmalı.")
+        if steps != sorted(set(steps)):
+            raise ValueError("Öğrenme adımlarını küçükten büyüğe, tekrarsız gir.")
+        result[key] = list(steps)
+    if not isinstance(result["burySiblings"], bool):
+        raise ValueError("Kardeş kartları ertele seçeneği geçersiz.")
+    if not result["graduatingDays"] <= result["easyDays"] <= result["maxIntervalDays"]:
+        raise ValueError("Kolay aralığı mezuniyet aralığından kısa, üst sınırdan uzun olamaz.")
+    return result
 
-    card: en azından easeFactor/intervalDays/repetitions alanlarını taşıyan dict
-    (new_card_state() veya önceki bir schedule_review() çıktısı).
-    rating: RATINGS içinden biri.
-    Dönüş: GÜNCELLENMİŞ zamanlama alanlarını içeren yeni bir dict (girdi
-    mutasyona uğratılmaz).
-    """
-    if rating not in _QUALITY_BY_RATING:
-        raise ValueError(f"Bilinmeyen değerlendirme: {rating!r} (beklenen: {RATINGS})")
+
+def card_state(card):
+    state = card.get("state")
+    if state in {"learning", "relearning", "review"}:
+        return state
+    return "review" if card.get("lastReviewedAt") is not None or card.get("repetitions", 0) > 0 else "new"
+
+
+def new_card_state():
+    return {"easeFactor": 2.5, "intervalDays": 0.0, "repetitions": 0,
+            "dueAt": time.time(), "lastReviewedAt": None, "state": "new",
+            "stepIndex": 0, "lapses": 0, "reviewVersion": 0}
+
+
+def schedule_review(card, rating, now=None, options=None):
+    if rating not in RATINGS:
+        raise ValueError(f"Bilinmeyen değerlendirme: {rating!r}")
+    opts = validate_options(options)
     now = time.time() if now is None else now
-    quality = _QUALITY_BY_RATING[rating]
-
-    ease_factor = float(card.get("easeFactor", _DEFAULT_EASE_FACTOR))
-    repetitions = int(card.get("repetitions", 0))
-
-    if quality < 3:
-        # "Tekrar" — kart unutulmuş sayılır, baştan başlar ama ease_factor'ü de
-        # (SM-2'nin orijinal tanımına sadık kalarak) aşağı çeker.
-        repetitions = 0
-        interval_days = 1.0
-    else:
-        if repetitions == 0:
-            interval_days = 1.0
-        elif repetitions == 1:
-            interval_days = 6.0
+    state = card_state(card)
+    ease = max(1.3, float(card.get("easeFactor") or 2.5))
+    interval = float(card.get("intervalDays") or 0)
+    step = int(card.get("stepIndex") or 0)
+    lapses = int(card.get("lapses") or 0)
+    reps = int(card.get("repetitions") or 0)
+    if state == "review":
+        days = max(1, interval)
+        good = max(days + 1, round(days * ease))
+        if rating == "again":
+            state, step = "relearning", 0
+            interval = max(1, round(days * 0.2))
+            delay = opts["relearningSteps"][0] * 60
+            ease = max(1.3, ease - 0.2)
+            lapses += 1
         else:
-            interval_days = round(float(card.get("intervalDays", 1.0)) * ease_factor, 2)
-        repetitions += 1
-
-    ease_factor = ease_factor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02))
-    ease_factor = max(_MIN_EASE_FACTOR, round(ease_factor, 3))
-
-    return {
-        "easeFactor": ease_factor,
-        "intervalDays": interval_days,
-        "repetitions": repetitions,
-        "dueAt": now + interval_days * _SECONDS_PER_DAY,
-        "lastReviewedAt": now,
-    }
+            if rating == "hard":
+                interval, ease = max(days + 1, round(days * 1.2)), max(1.3, ease - 0.15)
+            elif rating == "easy":
+                interval, ease = max(good + 1, round(days * ease * 1.3)), ease + 0.15
+            else:
+                interval = good
+            interval = min(interval, opts["maxIntervalDays"])
+            delay = interval * 86400
+    else:
+        relearning = state == "relearning"
+        steps = opts["relearningSteps"] if relearning else opts["learningSteps"]
+        step = min(max(step, 0), len(steps) - 1)
+        state = "relearning" if relearning else "learning"
+        if rating == "easy":
+            state = "review"
+            interval = max(interval, opts["easyDays"])
+        elif rating == "again":
+            step, delay = 0, steps[0] * 60
+        elif rating == "hard":
+            delay = ((steps[0] + steps[1]) / 2 if step == 0 and len(steps) > 1
+                     else steps[step] * 1.5 if len(steps) == 1 else steps[step]) * 60
+        elif step + 1 < len(steps):
+            step += 1
+            delay = steps[step] * 60
+        else:
+            state = "review"
+            interval = max(1, interval) if relearning else opts["graduatingDays"]
+        if state == "review":
+            step = 0
+            interval = min(interval, opts["maxIntervalDays"])
+            delay = interval * 86400
+    return {"easeFactor": round(ease, 3), "intervalDays": interval,
+            "repetitions": reps + 1, "dueAt": now + delay, "lastReviewedAt": now,
+            "state": state, "stepIndex": step, "lapses": lapses,
+            "reviewVersion": int(card.get("reviewVersion") or 0) + 1}

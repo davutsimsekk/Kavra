@@ -68,8 +68,9 @@ from app.flashcards import (
     regenerate_deck_cards,
     update_card,
 )
+from app import flashcard_study
 from app.quality_gate import load_or_analyze_quality
-from app.spaced_repetition import RATINGS, schedule_review
+from app.spaced_repetition import RATINGS
 from app.regenerate import apply_regeneration, resolve_source_sections
 from app.render_estimate import estimate_render
 from app.tts.pronunciation import (
@@ -972,7 +973,66 @@ def export_study_material(project_id: str, kind: str):
 
 
 def _deck_payload(deck: dict) -> dict:
-    return {**deck, "summary": deck_summary(deck["cards"])}
+    return flashcard_study.study_payload(deck)
+
+
+
+def _study_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except KeyError as exc:
+        raise HTTPException(404, "Deste veya kart bulunamadı.") from exc
+    except flashcard_study.StudyConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/projects/{project_id}/flashcards/decks/{deck_id}/options")
+def flashcard_options(project_id: str, deck_id: str, payload: dict = Body(...)):
+    values = payload.get("options", {})
+    if not isinstance(values, dict):
+        raise HTTPException(400, "Ayarlar nesne olmalı.")
+    return _study_call(flashcard_study.save_options, _project_dir(project_id), deck_id,
+                       values, payload.get("name"))
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/study/review")
+def study_review(project_id: str, deck_id: str, payload: dict = Body(...)):
+    return _study_call(flashcard_study.review, _project_dir(project_id), deck_id,
+                       str(payload.get("cardId", "")), str(payload.get("rating", "")),
+                       payload.get("expectedVersion"), payload.get("seconds", 0))
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/study/undo")
+def study_undo(project_id: str, deck_id: str, payload: dict = Body(...)):
+    return _study_call(flashcard_study.undo_review, _project_dir(project_id), deck_id,
+                       payload.get("eventId"))
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/bulk")
+def flashcard_bulk(project_id: str, deck_id: str, payload: dict = Body(...)):
+    return _study_call(flashcard_study.bulk_action, _project_dir(project_id), deck_id,
+                       payload.get("ids"), payload.get("action"), payload.get("tags"))
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/import")
+def flashcard_import(project_id: str, deck_id: str, payload: dict = Body(...)):
+    return _study_call(flashcard_study.import_text, _project_dir(project_id), deck_id,
+                       payload.get("text", ""))
+
+
+@app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/notes")
+def flashcard_note(project_id: str, deck_id: str, payload: dict = Body(...)):
+    return _study_call(flashcard_study.add_note, _project_dir(project_id), deck_id,
+                       payload.get("front", ""), payload.get("back", ""),
+                       payload.get("cardType", "basic"), payload.get("tags"))
+
+
+@app.post("/api/projects/{project_id}/flashcards/blank")
+def flashcard_blank(project_id: str, payload: dict = Body(...)):
+    deck = create_deck(_project_dir(project_id), str(payload.get("name", "Yeni Deste")), "static", [])
+    return _deck_payload(deck)
 
 
 @app.get("/api/projects/{project_id}/flashcards/decks")
@@ -1168,6 +1228,10 @@ def edit_flashcard(project_id: str, deck_id: str, card_id: str, payload: dict = 
         if not back:
             raise HTTPException(400, "Arka yüz boş olamaz.")
         changes["back"] = back
+    if "tags" in payload:
+        changes["tags"] = _study_call(flashcard_study.normalize_tags, payload["tags"])
+    if "flagged" in payload:
+        changes["flagged"] = bool(payload["flagged"])
     if not changes:
         raise HTTPException(400, "Değişiklik gönderilmedi.")
     changes["manual"] = True
@@ -1190,16 +1254,18 @@ def delete_flashcard(project_id: str, deck_id: str, card_id: str):
 
 @app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/restore")
 def restore_flashcard_schedule(project_id: str, deck_id: str, card_id: str, payload: dict = Body(...)):
-    """Bir önceki değerlendirmeyi geri almak için: istemcinin kart hakkında
-    değerlendirmeden ÖNCE sakladığı SM-2 alanlarını olduğu gibi geri yazar."""
+    """Legacy undo endpoint; restore the server snapshot and daily counters."""
     pdir = _project_dir(project_id)
-    allowed = {"easeFactor", "intervalDays", "repetitions", "dueAt", "lastReviewedAt", "suspended"}
-    changes = {k: payload[k] for k in allowed if k in payload}
-    try:
-        card = update_card(pdir, deck_id, card_id, changes)
-    except KeyError as exc:
-        raise HTTPException(404, "Kart bulunamadı.") from exc
-    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
+    deck = get_deck(pdir, deck_id)
+    if deck is None or not any(c["id"] == card_id for c in deck["cards"]):
+        raise HTTPException(404, "Kart bulunamadı.")
+    events = [e for e in deck.get("reviewLog", []) if not e.get("undone")]
+    if not events or events[-1]["cardId"] != card_id:
+        raise HTTPException(409, "Yalnız son değerlendirme geri alınabilir.")
+    result = _study_call(flashcard_study.undo_review, pdir, deck_id, events[-1]["id"])
+    return {"card": next(c for c in result["cards"] if c["id"] == card_id),
+            "summary": result["summary"]}
+
 
 
 @app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/review")
@@ -1214,11 +1280,11 @@ def review_flashcard(project_id: str, deck_id: str, card_id: str, payload: dict 
     card = next((c for c in deck["cards"] if c["id"] == card_id), None)
     if card is None:
         raise HTTPException(404, "Kart bulunamadı.")
-    try:
-        card = update_card(pdir, deck_id, card_id, schedule_review(card, rating))
-    except KeyError as exc:
-        raise HTTPException(404, "Kart bulunamadı.") from exc
-    return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
+    result = _study_call(flashcard_study.review, pdir, deck_id, card_id, rating,
+                         payload.get("expectedVersion"), payload.get("seconds", 0))
+    card = next(c for c in result["cards"] if c["id"] == card_id)
+    return {"card": card, "summary": result["summary"]}
+
 
 
 @app.post("/api/projects/{project_id}/flashcards/decks/{deck_id}/cards/{card_id}/suspend")

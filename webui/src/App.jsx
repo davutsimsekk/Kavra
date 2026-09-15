@@ -1,5 +1,8 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import FlashcardWorkspace from './FlashcardWorkspace.jsx'
+import { ThemeToggle, WorkspaceHeader } from './Appearance.jsx'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Search,
   ArrowDown,
   ArrowLeft,
   ArrowRight,
@@ -69,13 +72,6 @@ const QUEUE_STATUS_LABELS = {
   failed: 'Başarısız',
 }
 
-const ThreeBackdrop = lazy(() => import('./ThreeBackdrop.jsx'))
-
-function AmbientBackdrop({ disabled = false }) {
-  if (disabled) return <div className="three-backdrop css-only" aria-hidden="true" />
-  return <Suspense fallback={null}><ThreeBackdrop /></Suspense>
-}
-
 const SESSION_KEY = 'ders-studio-session'
 
 function loadSession() {
@@ -113,7 +109,7 @@ function Toggle({ checked, onChange, label, hint, disabled = false, wide = false
         className={`switch ${checked ? 'is-on' : ''}`}
         onClick={() => onChange(!checked)}
         disabled={disabled}
-        role="switch"
+        role="switch" aria-label={label}
         aria-checked={checked}
       >
         <span />
@@ -160,6 +156,24 @@ export default function App() {
   const [selectedSections, setSelectedSections] = useState(new Set())
   const [selectedSlide, setSelectedSlide] = useState(null)
   const [draft, setDraft] = useState(null)
+  const [projectQuery, setProjectQuery] = useState('')
+  const [sectionQuery, setSectionQuery] = useState('')
+  const [slideQuery, setSlideQuery] = useState('')
+  const [deckQuery, setDeckQuery] = useState('')
+  const [savingSlides, setSavingSlides] = useState(false)
+  const draftCache = useRef(new Map())
+  const saveInFlight = useRef(false)
+  const matches = (value, query) => String(value || '').toLocaleLowerCase('tr-TR').includes(query.trim().toLocaleLowerCase('tr-TR'))
+  const projectLabel = (id) => (id || '').replace(/[_-]+/g, ' ')
+  const draftKey = (id, index) => 'ders-studio-draft:' + id + ':' + index
+  const draftDirty = Boolean(draft && project?.slides[selectedSlide] && JSON.stringify(draft) !== JSON.stringify(project.slides[selectedSlide]))
+  function updateDraft(next) {
+    setDraft(next)
+    const key = draftKey(project.id, selectedSlide)
+    const value = { base: JSON.stringify(project.slides[selectedSlide]), draft: next }
+    draftCache.current.set(key, value)
+    try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* In-memory draft remains available. */ }
+  }
   const [sourcePath, setSourcePath] = useState('')
   const [pageMode, setPageMode] = useState(false)
   const [visionEnrich, setVisionEnrich] = useState(false)
@@ -189,16 +203,6 @@ export default function App() {
   const [deckCount, setDeckCount] = useState('')
   const [deckFocusPrompt, setDeckFocusPrompt] = useState('')
   const [flashcardBusy, setFlashcardBusy] = useState(false)
-  const [reviewQueue, setReviewQueue] = useState([])
-  const [reviewCard, setReviewCard] = useState(null)
-  const [reviewRevealed, setReviewRevealed] = useState(false)
-  const [reviewedCount, setReviewedCount] = useState(0)
-  const [reviewUndo, setReviewUndo] = useState(null)
-  const [editingCardId, setEditingCardId] = useState(null)
-  const [editDraft, setEditDraft] = useState({ front: '', back: '' })
-  const [showAddCard, setShowAddCard] = useState(false)
-  const [newCardFront, setNewCardFront] = useState('')
-  const [newCardBack, setNewCardBack] = useState('')
   const [pronunciationEntries, setPronunciationEntries] = useState([])
   const [newTerm, setNewTerm] = useState('')
   const [newPhonetic, setNewPhonetic] = useState('')
@@ -262,12 +266,12 @@ export default function App() {
             .then((projectData) => {
               setProject(projectData)
               setSelectedSections(new Set(projectData.sections.map((_, index) => index)))
-              setSelectedSlide(projectData.slides.length ? 0 : null)
+              setSelectedSlide(projectData.slides.length ? Math.min(Math.max(0, Number(session.selectedSlide) || 0), projectData.slides.length - 1) : null)
               if (session.stage) setStage(session.stage)
               // Eski oturumlarda (bu özellik eklenmeden önce) view kaydı yok —
               // aktif bir proje varsa geri döndüğümüzde doğrudan video modülüne
               // (kaldığı yere) dönmek, panele atmaktan daha az sürpriz olur.
-              setView(session.view === 'hub' ? 'hub' : session.view === 'anki' ? 'anki' : 'video')
+              setView(['dashboard', 'hub', 'anki', 'video'].includes(session.view) ? session.view : 'video')
               if (session.activeJob) {
                 api(`/api/jobs/${session.activeJob.id}`)
                   .then((job) => {
@@ -323,8 +327,43 @@ export default function App() {
       setDraft(null)
       return
     }
-    setDraft(structuredClone(project.slides[selectedSlide]))
-  }, [selectedSlide, project?.slides])
+    const base = project.slides[selectedSlide]
+    const key = draftKey(project.id, selectedSlide)
+    let saved = draftCache.current.get(key)
+    if (!saved) { try { saved = JSON.parse(localStorage.getItem(key)) } catch { /* No stored draft. */ } }
+    setDraft(structuredClone(saved?.base === JSON.stringify(base) ? saved.draft : base))
+  }, [selectedSlide, project?.id, project?.slides])
+
+  useEffect(() => {
+    if (sessionRestoredRef.current) patchSession({ selectedSlide })
+  }, [selectedSlide])
+
+  useEffect(() => {
+    setSectionQuery('')
+    setSlideQuery('')
+    setDeckQuery('')
+  }, [project?.id])
+
+  useEffect(() => {
+    const unload = (event) => { if (draftDirty) { event.preventDefault(); event.returnValue = '' } }
+    window.addEventListener('beforeunload', unload)
+    return () => window.removeEventListener('beforeunload', unload)
+  }, [draftDirty])
+
+  useEffect(() => {
+    const keydown = (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && view === 'video' && stage === 'script') {
+        event.preventDefault()
+        if (draftDirty && !activeJob && !saveInFlight.current) saveDraft()
+      }
+      if (event.key === 'Escape') {
+        setShowCost(false); setShowQueue(false); setShowPronunciation(false)
+      }
+    }
+    window.addEventListener('keydown', keydown)
+    return () => window.removeEventListener('keydown', keydown)
+  })
+
 
   useEffect(() => {
     if (!video.ttsProvider) return
@@ -430,7 +469,6 @@ export default function App() {
     if (view === 'anki' && project) loadFlashcardDecks()
     if (view !== 'anki') {
       setActiveDeck(null)
-      endReviewSession()
     }
   }, [view, project?.id])
 
@@ -535,26 +573,11 @@ export default function App() {
 
   const closeFlashcardDeck = () => {
     setActiveDeck(null)
-    endReviewSession()
     loadFlashcardDecks()
   }
 
-  const regenerateActiveDeck = async () => {
-    if (!project || !activeDeck) return
-    setFlashcardBusy(true)
-    try {
-      const deck = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/generate`, { method: 'POST' })
-      setActiveDeck(deck)
-      setToast({ type: 'success', text: 'Deste güncel slaytlardan yeniden oluşturuldu.' })
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    } finally {
-      setFlashcardBusy(false)
-    }
-  }
-
   const deleteFlashcardDeck = async (deckId) => {
-    if (!project) return
+    if (!project || !window.confirm('Deste ve kartları kalıcı olarak silinecek. Devam edilsin mi?')) return
     try {
       await api(`/api/projects/${project.id}/flashcards/decks/${deckId}`, { method: 'DELETE' })
       setFlashcardDecks((current) => current.filter((d) => d.id !== deckId))
@@ -564,162 +587,11 @@ export default function App() {
     }
   }
 
-  const startReviewSession = () => {
-    if (!activeDeck) return
-    const now = Date.now() / 1000
-    const due = activeDeck.cards
-      .filter((c) => !c.suspended && c.dueAt <= now)
-      .sort((a, b) => a.dueAt - b.dueAt)
-    if (!due.length) return
-    setReviewQueue(due.slice(1))
-    setReviewCard(due[0])
-    setReviewRevealed(false)
-    setReviewedCount(0)
-    setReviewUndo(null)
-  }
-
-  const endReviewSession = () => {
-    setReviewQueue([])
-    setReviewCard(null)
-    setReviewRevealed(false)
-    setReviewUndo(null)
-  }
-
-  const submitReviewRating = async (rating) => {
-    if (!project || !activeDeck || !reviewCard) return
-    const undoSnapshot = { card: reviewCard, queue: reviewQueue, count: reviewedCount }
-    try {
-      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${reviewCard.id}/review`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating }),
-      })
-      setActiveDeck((current) => ({
-        ...current,
-        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
-        summary: data.summary,
-      }))
-      setReviewUndo(undoSnapshot)
-      setReviewedCount((count) => count + 1)
-      if (reviewQueue.length) {
-        setReviewCard(reviewQueue[0])
-        setReviewQueue(reviewQueue.slice(1))
-        setReviewRevealed(false)
-      } else {
-        setReviewCard(null)
-        setReviewRevealed(false)
-      }
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    }
-  }
-
-  const undoLastReview = async () => {
-    if (!project || !activeDeck || !reviewUndo) return
-    const { card, queue, count } = reviewUndo
-    try {
-      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${card.id}/restore`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          easeFactor: card.easeFactor, intervalDays: card.intervalDays, repetitions: card.repetitions,
-          dueAt: card.dueAt, lastReviewedAt: card.lastReviewedAt, suspended: card.suspended,
-        }),
-      })
-      setActiveDeck((current) => ({
-        ...current,
-        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
-        summary: data.summary,
-      }))
-      setReviewCard(card)
-      setReviewQueue(queue)
-      setReviewedCount(count)
-      setReviewRevealed(false)
-      setReviewUndo(null)
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    }
-  }
-
-  const startEditCard = (card) => {
-    setEditingCardId(card.id)
-    setEditDraft({ front: card.front, back: card.back })
-  }
-
-  const cancelEditCard = () => {
-    setEditingCardId(null)
-    setEditDraft({ front: '', back: '' })
-  }
-
-  const saveEditCard = async () => {
-    if (!project || !activeDeck || !editingCardId) return
-    if (!editDraft.front.trim() || !editDraft.back.trim()) return
-    try {
-      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${editingCardId}`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ front: editDraft.front.trim(), back: editDraft.back.trim() }),
-      })
-      setActiveDeck((current) => ({
-        ...current,
-        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
-        summary: data.summary,
-      }))
-      cancelEditCard()
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    }
-  }
-
-  const addManualCard = async () => {
-    if (!project || !activeDeck) return
-    if (!newCardFront.trim() || !newCardBack.trim()) return
-    try {
-      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ front: newCardFront.trim(), back: newCardBack.trim() }),
-      })
-      setActiveDeck((current) => ({ ...current, cards: [...current.cards, data.card], summary: data.summary }))
-      setNewCardFront('')
-      setNewCardBack('')
-      setShowAddCard(false)
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    }
-  }
-
-  const deleteFlashcardCard = async (cardId) => {
-    if (!project || !activeDeck) return
-    try {
-      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${cardId}`, { method: 'DELETE' })
-      setActiveDeck((current) => ({
-        ...current,
-        cards: current.cards.filter((c) => c.id !== cardId),
-        summary: data.summary,
-      }))
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    }
-  }
-
   const goToCardSource = (card) => {
-    if (card.sourceSlideIndex === null || card.sourceSlideIndex === undefined) return
+    if (card.sourceSlideIndex == null) return
     setView('video')
     setStage('script')
     setSelectedSlide(card.sourceSlideIndex)
-  }
-
-  const toggleCardSuspend = async (card) => {
-    if (!project || !activeDeck) return
-    try {
-      const data = await api(`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/cards/${card.id}/suspend`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ suspended: !card.suspended }),
-      })
-      setActiveDeck((current) => ({
-        ...current,
-        cards: current.cards.map((c) => (c.id === data.card.id ? data.card : c)),
-        summary: data.summary,
-      }))
-    } catch (error) {
-      setToast({ type: 'error', text: error.message })
-    }
   }
 
   const savePronunciationOverrides = async (overrides, successMessage) => {
@@ -855,36 +727,11 @@ export default function App() {
     return () => clearTimeout(timer)
   }, [toast])
 
-  useEffect(() => {
-    if (!reviewCard) return undefined
-    const onKeyDown = (event) => {
-      const tag = event.target.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
-      if ((event.key === 'z' || event.key === 'Z') && reviewUndo) { undoLastReview(); return }
-      if (!reviewRevealed) {
-        if (event.code === 'Space' || event.key === 'Enter') { event.preventDefault(); setReviewRevealed(true) }
-        return
-      }
-      if (event.key === '1') submitReviewRating('again')
-      else if (event.key === '2') submitReviewRating('hard')
-      else if (event.key === '3') submitReviewRating('good')
-      else if (event.key === '4') submitReviewRating('easy')
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [reviewCard, reviewRevealed, reviewUndo])
 
   useEffect(() => {
     if (view !== 'video' || stage !== 'script' || selectedSlide === null) return
     document.getElementById(`slide-${selectedSlide}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [view, stage, selectedSlide])
-
-  const completion = useMemo(() => {
-    if (!project) return 0
-    if (project.outputs?.video) return 100
-    if (project.slides?.length) return 66
-    return 33
-  }, [project])
 
   const selectedSourceCharacters = useMemo(() => {
     if (!project) return 0
@@ -1006,41 +853,64 @@ export default function App() {
     })
   }
 
-  const persistSlides = async (slides, message) => {
-    if (!project) return
-    setProject((current) => ({ ...current, slides }))
+  const persistSlides = async (slides, message, savedDraftKey = null) => {
+    if (!project || saveInFlight.current || activeJob) return false
+    saveInFlight.current = true
+    setSavingSlides(true)
+    const projectId = project.id
     try {
-      const data = await api(`/api/projects/${project.id}/slides`, {
+      const data = await api(`/api/projects/${projectId}/slides`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slides }),
       })
-      setProject((current) => current ? {
-        ...current,
-        quality: data.quality,
-        assets: data.assets || current.assets,
+      // Reindex drafts with their original slide objects when slides move or are inserted.
+      // A changed or deleted slide must never receive another slide's stale draft.
+      const pending = []
+      project.slides.forEach((original, index) => {
+        const key = draftKey(projectId, index)
+        let stored = draftCache.current.get(key)
+        if (!stored) { try { stored = JSON.parse(localStorage.getItem(key)) } catch { /* No local draft. */ } }
+        const newIndex = slides.indexOf(original)
+        if (key !== savedDraftKey && newIndex >= 0 && stored?.base === JSON.stringify(original)) {
+          pending.push([draftKey(projectId, newIndex), { ...stored, base: JSON.stringify((data.slides || slides)[newIndex]) }])
+        }
+        draftCache.current.delete(key)
+        try { localStorage.removeItem(key) } catch { /* In-memory storage remains available. */ }
+      })
+      pending.forEach(([key, value]) => {
+        draftCache.current.set(key, value)
+        try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* In-memory draft remains available. */ }
+      })
+      setProject((current) => current?.id === projectId ? {
+        ...current, slides: data.slides || slides, quality: data.quality, assets: data.assets || current.assets,
       } : current)
       if (message) setToast({ type: 'success', text: message })
+      return true
     } catch (error) {
-      setToast({ type: 'error', text: error.message })
+      setToast({ type: 'error', text: (savedDraftKey ? 'Kaydedilemedi. Değişikliklerin taslakta duruyor. ' : 'Kaydedilemedi. Kayıtlı slaytlar değiştirilmedi. ') + error.message })
+      return false
+    } finally {
+      saveInFlight.current = false
+      setSavingSlides(false)
     }
   }
 
   const saveDraft = () => {
-    if (selectedSlide === null || !draft) return
+    if (selectedSlide === null || !draft || savingSlides) return
     const next = [...project.slides]
     next[selectedSlide] = { ...draft, bullets: draft.bullets.filter(Boolean), manuallyEdited: true }
-    persistSlides(next, 'Slayt kaydedildi.')
+    return persistSlides(next, 'Slayt kaydedildi.', draftKey(project.id, selectedSlide))
   }
 
-  const addSlide = () => {
+  const addSlide = async () => {
+    if (saveInFlight.current || !project) return
     const at = selectedSlide === null ? project.slides.length : selectedSlide + 1
     const next = [...project.slides]
     next.splice(at, 0, {
       title: 'Yeni slayt', bullets: [], code: null, narration: '', level: 'topic',
       sourceSectionIds: [], sourceTitles: [], manuallyEdited: true,
     })
-    setSelectedSlide(at)
-    persistSlides(next, 'Yeni slayt eklendi.')
+    if (await persistSlides(next, 'Yeni slayt eklendi.')) setSelectedSlide(at)
   }
 
   const regenerateSlide = async () => {
@@ -1062,29 +932,29 @@ export default function App() {
     }
   }
 
-  const deleteSlide = (index) => {
+  const deleteSlide = async (index) => {
+    if (saveInFlight.current || !window.confirm('“' + (project.slides[index].title || 'Başlıksız slayt') + '” silinsin mi?')) return
     const next = project.slides.filter((_, slideIndex) => slideIndex !== index)
-    setSelectedSlide(next.length ? Math.min(index, next.length - 1) : null)
-    persistSlides(next, 'Slayt silindi.')
+    if (await persistSlides(next, 'Slayt silindi.')) setSelectedSlide(next.length ? Math.min(index, next.length - 1) : null)
   }
 
-  const moveSlide = (index, delta) => {
+  const moveSlide = async (index, delta) => {
+    if (saveInFlight.current) return
     const target = index + delta
     if (target < 0 || target >= project.slides.length) return
     const next = [...project.slides]
     ;[next[index], next[target]] = [next[target], next[index]]
-    setSelectedSlide(target)
-    persistSlides(next)
+    if (await persistSlides(next)) setSelectedSlide(target)
   }
 
-  const dropSlide = (targetIndex) => {
+  const dropSlide = async (targetIndex) => {
+    if (saveInFlight.current) return
     if (draggedSlide === null || draggedSlide === targetIndex) return
     const next = [...project.slides]
     const [moved] = next.splice(draggedSlide, 1)
     next.splice(targetIndex, 0, moved)
-    setSelectedSlide(targetIndex)
     setDraggedSlide(null)
-    persistSlides(next, 'Slayt sırası güncellendi.')
+    if (await persistSlides(next, 'Slayt sırası güncellendi.')) setSelectedSlide(targetIndex)
   }
 
   const generate = async () => {
@@ -1158,9 +1028,9 @@ export default function App() {
   const renderSourceIngest = () => (
     <section className="panel source-ingest">
       <div className="section-heading">
-        <span className="kicker">MATERYAL GİRİŞİ</span>
-        <h2>Dersin hammaddesini içeri al.</h2>
-        <p>PDF, PowerPoint veya Markdown dosyasını bırak. Bölümleri senin için ayrıştırıp seçilebilir hale getireceğiz.</p>
+        <span className="kicker">YENİ KAYNAK</span>
+        <h2>Kaynağını ekle.</h2>
+        <p>PDF, PowerPoint veya Markdown dosyandan bir ders projesi oluştur.</p>
       </div>
       <label
         className={`drop-zone ${isDropping ? 'is-dropping' : ''}`}
@@ -1168,24 +1038,26 @@ export default function App() {
         onDragLeave={() => setIsDropping(false)}
         onDrop={(event) => { event.preventDefault(); setIsDropping(false); uploadSource(event.dataTransfer.files[0]) }}
       >
-        <input type="file" accept=".md,.pptx,.pdf" onChange={(event) => uploadSource(event.target.files[0])} />
+        <input aria-label="Kaynak dosyası seç" disabled={busy} type="file" accept=".md,.pptx,.pdf" onChange={(event) => uploadSource(event.target.files[0])} />
         <span className="upload-orbit"><UploadCloud size={28} /></span>
         <strong>{busy ? 'Dosya işleniyor…' : 'Dosyayı buraya bırak'}</strong>
         <small>veya seçmek için tıkla · en fazla 100 MB</small>
       </label>
       <div className="path-divider"><span>ya da bu bilgisayardaki yolu kullan</span></div>
       <div className="path-input">
-        <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="D:\\dersler\\konu.pdf" />
+        <input aria-label="Kaynak dosyasının bilgisayardaki yolu" value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="D:\\dersler\\konu.pdf" />
         <button className="button ghost" onClick={parsePath} disabled={!sourcePath.trim() || busy}>Ayrıştır</button>
       </div>
+      <details className="options-disclosure">
+        <summary><Settings2 size={16} /> PDF seçenekleri{(pageMode || visionEnrich || extractDiagrams) && <span className="memory-pill">Özel ayar</span>}<ChevronRight size={16} className="disclosure-chevron" /></summary>
       <Toggle
         wide
         checked={pageMode}
         onChange={setPageMode}
         label="Sayfaları birebir slayt olarak kullan (yalnızca PDF)"
         hint={pageMode
-          ? 'Her PDF sayfası olduğu gibi bir slayt görseli olur (bizim tema/başlık/madde tasarımımız kullanılmaz); yapay zeka sadece o sayfa için anlatım metni yazar. PDF olmayan bir dosyada bu seçenek hataya yol açar.'
-          : 'Kapalıyken içerik her zamanki gibi kendi slayt tasarımımızla (tema, başlık, madde) yeniden oluşturulur.'}
+          ? 'PDF sayfasının görünümü korunur; yalnızca sesli anlatım hazırlanır. Bu seçeneği PDF dosyalarıyla kullan.'
+          : 'İçerik, seçtiğin slayt temasıyla yeniden düzenlenir.'}
       />
       <Toggle
         wide
@@ -1193,24 +1065,25 @@ export default function App() {
         onChange={setVisionEnrich}
         label="Görsel anlama kullan (yalnızca PDF)"
         hint={visionEnrich
-          ? 'Metni çok az/hiç olmayan sayfalar (muhtemelen diyagram/ekran görüntüsü) Gemini\'ye gönderilip bir açıklama alınır — anlatım sağlayıcın ne olursa olsun (multimodal olması gerekmez), o metni kullanır. Sayfa/görsel başına ek bir API çağrısı, dolayısıyla ek maliyet demektir.'
+          ? 'Görsel ağırlıklı sayfalar Gemini ile açıklanır. Sayfa başına ek API maliyeti oluşabilir.'
           : 'Kapalıyken görsel-ağırlıklı sayfalar normal modda atlanır, sayfa modunda ise metinsiz bırakılır.'}
       />
       {visionEnrich && !bootstrap.keysConfigured.gemini && (
         <label className="field wide">
           <span>Gemini API anahtarı (sadece görsel anlama için)</span>
-          <input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Anlatım sağlayıcından bağımsız, ücretsiz alınabilir" />
+          <input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Gemini API anahtarın" />
         </label>
       )}
       <Toggle
         wide
         checked={extractDiagrams}
         onChange={setExtractDiagrams}
-        label="Diyagram/görsel çıkar (yalnızca PDF)"
+        label="PDF içindeki görselleri kullan"
         hint={extractDiagrams
-          ? 'Sayfadaki gerçek, gömülü bir görsel (diyagram/grafik) varsa olduğu gibi çıkarılıp o sayfanın slaydına, maddelerin yanına yerleştirilir — hiçbir şey üretilmez/yapay zekaya çizdirilmez, kaynaktaki piksellerin birebir kopyası kullanılır. Ücretsiz, API gerektirmez.'
+          ? 'PDF içindeki mevcut görseller slayta eklenir. Ücretsizdir; yapay zeka kullanmaz.'
           : 'Kapalıyken slaytlar her zamanki gibi sadece metinle (başlık/madde) oluşturulur.'}
       />
+      </details>
     </section>
   )
 
@@ -1230,12 +1103,15 @@ export default function App() {
             <span>{selectedSections.size}/{project.sections.length}</span>
           </div>}
         </div>
+        {project && <label className="search-field"><Search size={16} /><input aria-label="Bölümlerde ara" placeholder="Bölümlerde ara…" value={sectionQuery} onChange={(e) => setSectionQuery(e.target.value)} /></label>}
+        {project && !project.sections.some((section) => matches(section.title + ' ' + section.text, sectionQuery)) && <p className="list-empty">Bu aramayla eşleşen bölüm yok.</p>}
         {!project ? <EmptyState icon={BookOpen} title="İçerik burada şekillenecek">Bir kaynak eklediğinde başlık yapısını ve her bölümün uzunluğunu burada göreceksin.</EmptyState> : (
           <div className="section-list">
             {project.sections.map((section, index) => {
+              if (!matches(section.title + ' ' + section.text, sectionQuery)) return null
               const selected = selectedSections.has(index)
               const completed = completedSections.has(index)
-              return <button key={`${section.title}-${index}`} className={`section-row ${selected ? 'selected' : ''} ${completed ? 'completed' : ''}`} onClick={() => toggleSection(index)}>
+              return <button key={`${section.title}-${index}`} aria-pressed={selected} className={`section-row ${selected ? 'selected' : ''} ${completed ? 'completed' : ''}`} onClick={() => toggleSection(index)}>
                 <span className="check-box">{selected && <Check size={14} />}</span>
                 <span className="section-index">{String(index + 1).padStart(2, '0')}</span>
                 <span className="section-main"><strong>{section.title || 'Başlıksız bölüm'}</strong><small>{completed ? 'Tamamlandı · ' : ''}{section.breadcrumb || `Seviye ${section.level}`}</small></span>
@@ -1273,11 +1149,8 @@ export default function App() {
 
   const renderScript = () => (
     <div className="script-layout">
-      <section className="panel generation-console">
-        <div className="panel-toolbar">
-          <div><span className="kicker">ANLATI MOTORU</span><h3>Üretim ayarları</h3></div>
-          <span className="memory-pill"><Zap size={13} /> Ders hafızası açık</span>
-        </div>
+      <details className="panel generation-console" key={project?.id} open={!project?.slides.length || activeJob?.type === 'script' || undefined}>
+        <summary><WandSparkles size={20} /><span>Yeni anlatı üret<small>{selectedSections.size} bölüm seçili · Sağlayıcı, üslup ve süre ayarları</small></span><ChevronRight size={18} className="disclosure-chevron" /></summary>
         <div className="provider-tabs">
           {[['agent', 'Claude Agent'], ['gemini', 'Gemini API'], ['openai', 'OpenAI uyumlu']].map(([id, label]) => <button key={id} className={llm.provider === id ? 'active' : ''} onClick={() => setLlm({ ...llm, provider: id, apiKey: '' })}>{label}</button>)}
         </div>
@@ -1313,10 +1186,12 @@ export default function App() {
         </div>
         <button className="button primary generate-button" onClick={generate} disabled={!project || !selectedSections.size || !effectiveSelectedCount || Boolean(activeJob)}><WandSparkles size={17} /> {activeJob?.type === 'script' ? 'Üretiliyor…' : effectiveSelectedCount ? `${effectiveSelectedCount} kalan bölümden üret` : 'Seçimde bekleyen bölüm yok'}</button>
         <ProgressStrip job={activeJob?.type === 'script' || jobState?.kind === 'script' ? jobState : null} />
-      </section>
+      </details>
 
       <section className="panel slide-rail">
-        <div className="panel-toolbar"><div><span className="kicker">AKIŞ</span><h3>{project?.slides.length || 0} slayt</h3></div><button className="icon-button" onClick={addSlide} title="Yeni slayt"><Plus size={18} /></button></div>
+        <div className="panel-toolbar"><div><span className="kicker">AKIŞ</span><h3>{project?.slides.length || 0} slayt</h3></div><button className="icon-button" onClick={addSlide} disabled={savingSlides || Boolean(activeJob)} title="Yeni slayt"><Plus size={18} /></button></div>
+        <label className="search-field"><Search size={16} /><input aria-label="Slaytlarda ara" placeholder="Slaytlarda ara…" value={slideQuery} onChange={(e) => setSlideQuery(e.target.value)} /></label>
+        {project?.slides.length > 0 && !project.slides.some((slide) => matches(slide.title + ' ' + slide.narration, slideQuery)) && <p className="list-empty">Eşleşen slayt yok.</p>}
         {project?.slides.length > 0 && <div className={`quality-card ${quality?.status || 'unknown'}`}>
           <span className="quality-icon">{quality?.status === 'passed' ? <ShieldCheck size={19} /> : <TriangleAlert size={19} />}</span>
           <span>
@@ -1325,20 +1200,24 @@ export default function App() {
           </span>
           <button type="button" onClick={refreshQuality} disabled={Boolean(activeJob)} aria-label="Kalite denetimini yenile"><RefreshCw size={13} /></button>
         </div>}
-        {snapshots.length > 0 && <div className="chapter-list snapshot-list">
+        {snapshots.length > 0 && <details className="snapshot-disclosure"><summary>Önceki sürümler ({snapshots.length})<ChevronRight size={14} className="disclosure-chevron" /></summary><div className="chapter-list snapshot-list">
           {snapshots.map((snap) => (
             <div key={snap.filename} className="chapter-item">
               <span>{SNAPSHOT_REASON_LABELS[snap.reason] || snap.reason} <small>({snap.slideCount ?? '?'} slayt, {new Date(snap.savedAt).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })})</small></span>
               <a onClick={(event) => { event.preventDefault(); restoreSnapshotVersion(snap.filename) }} href="#restore">Geri Yükle</a>
             </div>
           ))}
-        </div>}
+        </div></details>}
         {!project?.slides.length ? <EmptyState icon={Layers3} title="Anlatı henüz boş">Seçili bölümlerden ilk slayt setini üret.</EmptyState> : <div className="slide-list">
-          {project.slides.map((slide, index) => <article
+          {project.slides.map((slide, index) => !matches(slide.title + ' ' + slide.narration, slideQuery) ? null : <article
             key={`${slide.title}-${index}`}
             id={`slide-${index}`}
             className={`slide-card ${selectedSlide === index ? 'active' : ''}`}
-            draggable
+            tabIndex={0}
+            aria-label={`Slayt ${index + 1}: ${slide.title || 'Başlıksız'}`}
+            aria-current={selectedSlide === index ? 'true' : undefined}
+            onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setSelectedSlide(index) } }}
+            draggable={!savingSlides && !activeJob}
             onDragStart={() => setDraggedSlide(index)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={() => dropSlide(index)}
@@ -1348,17 +1227,17 @@ export default function App() {
             <span className="slide-number">{String(index + 1).padStart(2, '0')}</span>
             <span className="slide-copy"><strong>{slide.title || 'Başlıksız'}</strong><small>{slide.level === 'chapter' ? 'Bölüm kapağı' : `${slide.bullets.length} madde`}</small></span>
             <span className="slide-actions">
-              <button onClick={(event) => { event.stopPropagation(); moveSlide(index, -1) }} aria-label="Yukarı taşı"><ArrowUp size={14} /></button>
-              <button onClick={(event) => { event.stopPropagation(); moveSlide(index, 1) }} aria-label="Aşağı taşı"><ArrowDown size={14} /></button>
-              <button className="danger" onClick={(event) => { event.stopPropagation(); deleteSlide(index) }} aria-label="Sil"><Trash2 size={14} /></button>
+              <button onClick={(event) => { event.stopPropagation(); moveSlide(index, -1) }} disabled={savingSlides || Boolean(activeJob) || index === 0} aria-label="Yukarı taşı"><ArrowUp size={14} /></button>
+              <button onClick={(event) => { event.stopPropagation(); moveSlide(index, 1) }} disabled={savingSlides || Boolean(activeJob) || index === project.slides.length - 1} aria-label="Aşağı taşı"><ArrowDown size={14} /></button>
+              <button className="danger" onClick={(event) => { event.stopPropagation(); deleteSlide(index) }} disabled={savingSlides || Boolean(activeJob)} aria-label="Sil"><Trash2 size={14} /></button>
             </span>
           </article>)}
         </div>}
       </section>
 
       <section className="panel editor-panel">
-        <div className="panel-toolbar"><div><span className="kicker">DÜZENLEYİCİ</span><h3>{draft ? `Slayt ${(selectedSlide || 0) + 1}` : 'Bir slayt seç'}</h3></div>{draft && <button className="button compact" onClick={saveDraft}><Save size={15} /> Kaydet</button>}</div>
-        {!draft ? <EmptyState icon={Settings2} title="Ayrıntıları düzenle">Akıştan bir slayt seçerek başlık, maddeler ve anlatım metnini değiştirebilirsin.</EmptyState> : <div className="editor-form">
+        <div className="panel-toolbar"><div><span className="kicker">DÜZENLEYİCİ</span><h3>{draft ? `Slayt ${(selectedSlide || 0) + 1}` : 'Bir slayt seç'}</h3>{draft && <span className={`draft-state ${draftDirty ? 'dirty' : ''}`}>{savingSlides ? 'Kaydediliyor…' : draftDirty ? 'Kaydedilmemiş taslak' : 'Tüm değişiklikler kaydedildi'}</span>}</div>{draft && <button className="button primary compact" disabled={!draftDirty || savingSlides || Boolean(activeJob)} title="Kaydet (Ctrl+S)" onClick={saveDraft}><Save size={15} /> Kaydet</button>}</div>
+        {!draft ? <EmptyState icon={Settings2} title="Ayrıntıları düzenle">Akıştan bir slayt seçerek başlık, maddeler ve anlatım metnini değiştirebilirsin.</EmptyState> : <fieldset className="editor-form" disabled={savingSlides || Boolean(activeJob)}>
           {draft.sourceSectionIds?.length > 0 ? <div className="source-row">
             <span className="source-label"><Layers3 size={13} /> Kaynak: {draft.sourceTitles?.join(', ') || `${draft.sourceSectionIds.length} bölüm`}</span>
             <button type="button" className="button ghost compact" onClick={regenerateSlide} disabled={Boolean(activeJob)}>
@@ -1366,17 +1245,21 @@ export default function App() {
             </button>
           </div> : <div className="source-row muted"><span className="source-label">Elle eklendi · kaynağı yok</span></div>}
           <ProgressStrip job={activeJob?.type === 'regenerate' || jobState?.kind === 'regenerate' ? jobState : null} />
-          <label className="field"><span>Başlık</span><input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></label>
-          <label className="field"><span>Tür</span><select value={draft.level} onChange={(e) => setDraft({ ...draft, level: e.target.value })}><option value="topic">Konu slaytı</option><option value="chapter">Bölüm kapağı</option></select></label>
-          <label className="field"><span>Maddeler <em>satır başına bir tane</em></span><textarea rows="5" value={draft.bullets.join('\n')} onChange={(e) => setDraft({ ...draft, bullets: e.target.value.split('\n') })} /></label>
-          <label className="field"><span>Kod</span><textarea className="code-input" rows="5" value={draft.code || ''} onChange={(e) => setDraft({ ...draft, code: e.target.value || null })} placeholder="İsteğe bağlı" /></label>
-          <label className="field"><span>Tam anlatım metni</span><textarea rows="11" value={draft.narration} onChange={(e) => setDraft({ ...draft, narration: e.target.value })} /></label>
+          <div className="editor-heading-fields">
+          <label className="field"><span>Başlık</span><input value={draft.title} onChange={(e) => updateDraft({ ...draft, title: e.target.value })} /></label>
+          <label className="field"><span>Tür</span><select value={draft.level} onChange={(e) => updateDraft({ ...draft, level: e.target.value })}><option value="topic">Konu slaytı</option><option value="chapter">Bölüm kapağı</option></select></label>
+          </div>
+          <label className="field"><span>Tam anlatım metni</span><textarea rows="11" value={draft.narration} onChange={(e) => updateDraft({ ...draft, narration: e.target.value })} /></label>
+          <label className="field"><span>Maddeler <em>satır başına bir tane</em></span><textarea rows="5" value={draft.bullets.join('\n')} onChange={(e) => updateDraft({ ...draft, bullets: e.target.value.split('\n') })} /></label>
+          <details className="editor-code" key={selectedSlide} open={Boolean(draft.code) || undefined}><summary>Kod örneği <span>İsteğe bağlı</span><ChevronRight size={14} className="disclosure-chevron" /></summary>
+          <label className="field"><span>Kod</span><textarea className="code-input" rows="5" value={draft.code || ''} onChange={(e) => updateDraft({ ...draft, code: e.target.value || null })} placeholder="İsteğe bağlı" /></label>
+          </details>
           <div className="editor-meta"><Clock3 size={14} /><span>Yaklaşık {Math.max(1, Math.round((draft.narration || '').split(/\s+/).length / 2.2))} sn anlatım</span></div>
           {selectedQualityIssues.length > 0 && <div className="quality-issues">
             <strong><TriangleAlert size={14} /> Bu slaytta {selectedQualityIssues.length} bulgu</strong>
             {selectedQualityIssues.map((issue, index) => <div key={`${issue.code}-${index}`} className={issue.severity}>{issue.message}</div>)}
           </div>}
-        </div>}
+        </fieldset>}
       </section>
     </div>
   )
@@ -1482,28 +1365,30 @@ export default function App() {
     </div>
   )
 
-  if (!bootstrap) return <div className="app-loading"><AmbientBackdrop />{bootstrapError ? <><span className="brand-mark error-mark"><CircleAlert /></span><h1>Yerel servis bağlantısı yok</h1><p>{bootstrapError}</p><button className="button primary" onClick={() => setBootstrapRetry((value) => value + 1)}><RefreshCw size={16} /> Yeniden bağlan</button></> : <><span className="brand-mark"><Sparkles /></span><h1>Ders Stüdyosu</h1><p>Çalışma alanın hazırlanıyor…</p><LoaderCircle className="spin" /></>}</div>
+  if (!bootstrap) return <div className="app-loading">{bootstrapError ? <><span className="brand-mark error-mark"><CircleAlert /></span><h1>Yerel servis bağlantısı yok</h1><p>{bootstrapError}</p><button className="button primary" onClick={() => setBootstrapRetry((value) => value + 1)}><RefreshCw size={16} /> Yeniden bağlan</button></> : <><span className="brand-mark"><Sparkles /></span><h1>Ders Stüdyosu</h1><p>Çalışma alanın hazırlanıyor…</p><LoaderCircle className="spin" /></>}</div>
 
   if (view === 'dashboard') {
     return (
       <div className="dashboard-shell">
-        <AmbientBackdrop />
+
+        <WorkspaceHeader onHome={() => setView('dashboard')} current="Çalışma alanı" />
         <div className="dashboard-hero">
-          <span className="brand-mark"><Sparkles size={22} /></span>
-          <h1>Ders Stüdyosu</h1>
-          <p>Bir kaynak seç ya da yeni bir tane ekle; sonra ne yapmak istediğine karar ver.</p>
+          <div className="home-intro"><div><span className="kicker">ÇALIŞMA ALANIN</span><h1>Bir kaynaktan, birçok öğrenme yolu.</h1><p>Derslerini düzenle, anlatımlı videolar hazırla ve kartlarla bilgini tazele. Kaldığın yerden devam et ya da yeni bir kaynak ekle.</p></div>
+          <div className="hero-summary"><div><strong>{bootstrap.projects.length}</strong><span>proje</span></div><div><strong>{bootstrap.projects.reduce((sum, item) => sum + item.slides, 0)}</strong><span>slayt</span></div></div></div>
         </div>
         <div className="dashboard-grid">
           <section className="panel dashboard-projects">
-            <div className="panel-toolbar"><div><span className="kicker">PROJELER</span><h3>Var olan kaynaklar</h3></div></div>
+            <div className="panel-toolbar"><div><span className="kicker">KİTAPLIĞIN</span><h3>Projelerin</h3></div><span className="memory-pill">{bootstrap.projects.length} proje</span></div>
+            <label className="search-field"><Search size={17} /><input aria-label="Projelerde ara" placeholder="Proje adıyla ara…" value={projectQuery} onChange={(e) => setProjectQuery(e.target.value)} /></label>
             <div className="dashboard-project-list">
               {bootstrap.projects.length === 0 && (
-                <EmptyState icon={FolderOpen} title="Henüz proje yok">Sağdan yeni bir kaynak ekleyerek başla.</EmptyState>
+                <EmptyState icon={FolderOpen} title="Henüz proje yok">Yeni kaynak alanından ilk dosyanı ekleyerek başla.</EmptyState>
               )}
-              {bootstrap.projects.map((item) => (
+              {bootstrap.projects.length > 0 && !bootstrap.projects.some((item) => matches(projectLabel(item.id), projectQuery)) && <p className="list-empty">Bu adla bir proje bulunamadı.</p>}
+              {bootstrap.projects.filter((item) => matches(projectLabel(item.id), projectQuery)).map((item) => (
                 <button key={item.id} className="dashboard-project-card" onClick={() => openProjectHub(item.id)} disabled={busy}>
                   <FolderOpen size={20} />
-                  <span className="dashboard-project-card-main"><strong>{item.id}</strong><small>{item.sections} bölüm · {item.slides} slayt</small></span>
+                  <span className="dashboard-project-card-main"><strong title={item.id}>{projectLabel(item.id)}</strong><small>{item.sections} bölüm · {item.slides} slayt</small></span>
                   <ChevronRight size={16} />
                 </button>
               ))}
@@ -1511,36 +1396,37 @@ export default function App() {
           </section>
           <div className="dashboard-upload">{renderSourceIngest()}</div>
         </div>
-        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+        {toast && <div role={toast.type === 'error' ? 'alert' : 'status'} className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button aria-label="Bildirimi kapat" onClick={() => setToast(null)}><X size={16} /></button></div>}
       </div>
     )
   }
 
   if (view === 'hub') {
-    const hubCompletion = project ? (project.outputs?.video ? 100 : project.slides.length ? 66 : 20) : 0
     return (
       <div className="dashboard-shell">
-        <AmbientBackdrop />
-        <button className="button quiet hub-back" onClick={() => setView('dashboard')}><ArrowLeft size={16} /> Panele dön</button>
+
+        <WorkspaceHeader onHome={() => setView('dashboard')} projectName={project?.id} onProject={() => setView('hub')} current="Genel bakış" />
         <div className="dashboard-hero">
           <span className="kicker">PROJE</span>
-          <h1>{project?.id}</h1>
-          <p>{project?.sections.length || 0} bölüm · {project?.slides.length || 0} slayt — ne yapmak istiyorsun?</p>
+          <h1>{projectLabel(project?.id)}</h1>
+          <p>Kaynağın hazır. İçeriğini bir derse dönüştür veya tekrar kartlarınla çalış.</p>
+          <div className="project-facts"><span>{project?.sections.length || 0} kaynak bölümü</span><span>{project?.slides.length || 0} slayt</span><span>{project?.outputs?.video ? 'Video hazır' : 'Video henüz üretilmedi'}</span></div>
         </div>
         <div className="hub-modules">
-          <button className="hub-module-card" onClick={() => setView('video')}>
+          <button className="hub-module-card" onClick={() => { setStage(project?.slides.length ? 'script' : 'source'); setView('video') }}>
             <Clapperboard size={30} />
-            <strong>Video Üretimi</strong>
+            <strong>Dersini hazırla</strong>
             <small>{project?.outputs?.video ? 'Video hazır — düzenlemeye devam et' : project?.slides.length ? 'Anlatı hazır, render bekliyor' : 'Henüz başlanmadı'}</small>
-            <div className="mini-progress"><span style={{ width: `${hubCompletion}%` }} /></div>
+            <span className="module-action">Ders stüdyosunu aç <ArrowRight size={16} /></span>
           </button>
-          <button className="hub-module-card" onClick={() => setView('anki')} disabled={!project?.slides.length}>
+          <button className="hub-module-card" onClick={() => setView('anki')}>
             <Layers3 size={30} />
-            <strong>Flashcard Çalışma</strong>
-            <small>{project?.slides.length ? 'Kaynaktan üretilen kartlarla aralıklı tekrar yap' : 'Önce Video Üretimi\'nden bir anlatı üret'}</small>
+            <strong>Kartlarla öğren</strong>
+            <small>Destelerini düzenle, zamanı gelen kartları çalış ve öğrenme ilerlemeni takip et.</small>
+            <span className="module-action">Flashcard destelerine git <ArrowRight size={16} /></span>
           </button>
         </div>
-        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+        {toast && <div role={toast.type === 'error' ? 'alert' : 'status'} className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button aria-label="Bildirimi kapat" onClick={() => setToast(null)}><X size={16} /></button></div>}
       </div>
     )
   }
@@ -1548,26 +1434,29 @@ export default function App() {
   if (view === 'anki' && !activeDeck) {
     return (
       <div className="dashboard-shell">
-        <AmbientBackdrop />
-        <button className="button quiet hub-back" onClick={() => setView('hub')}><ArrowLeft size={16} /> Panele dön</button>
+
+        <WorkspaceHeader onHome={() => setView('dashboard')} projectName={project?.id} onProject={() => setView('hub')} current="Flashcard" />
         <div className="dashboard-hero">
           <span className="kicker">FLASHCARD ÇALIŞMA</span>
-          <h1>{project?.id}</h1>
-          <p>Anki'deki gibi, aynı kaynaktan birden fazla deste tutabilirsin — ör. farklı sınavlar için statik bir deste, belirli bir konuya odaklanan yapay zeka destekli başka bir deste.</p>
+          <h1>{projectLabel(project?.id)}</h1>
+          <p>Bir deste seç, tekrarlarına başla. Kendi kartlarını ücretsiz ekleyebilir ya da dersinden yeni desteler oluşturabilirsin.</p>
         </div>
         <div className="anki-overview">
+          <details className="panel deck-create" open>
+          <summary><Plus size={19} /> Yeni deste oluştur<ChevronRight size={16} className="disclosure-chevron" /></summary>
+          <div className="deck-create-content">
           <div className="provider-tabs compact">
-            <button className={deckKind === 'static' ? 'active' : ''} onClick={() => setDeckKind('static')}>Statik</button>
+            <button className={deckKind === 'static' ? 'active' : ''} onClick={() => setDeckKind('static')}>Dersten · ücretsiz</button>
             <button className={deckKind === 'llm' ? 'active' : ''} onClick={() => setDeckKind('llm')}>Yapay Zeka ile Üret</button>
           </div>
           <div className="deck-create-row">
-            <input value={newDeckName} onChange={(e) => setNewDeckName(e.target.value)} placeholder="Yeni deste adı, ör. Sınav Öncesi" />
-            <button className="button primary" onClick={createFlashcardDeck} disabled={!newDeckName.trim() || flashcardBusy}>
-              <Plus size={16} /> {activeJob?.type === 'flashcards' ? 'Oluşturuluyor…' : deckKind === 'llm' ? 'Yapay Zeka ile Oluştur' : 'Statik Deste Oluştur'}
+            <input aria-label="Yeni deste adı" value={newDeckName} onChange={(e) => setNewDeckName(e.target.value)} placeholder="Yeni deste adı, ör. Sınav Öncesi" />
+            <button className="button primary" onClick={createFlashcardDeck} disabled={!newDeckName.trim() || flashcardBusy || !project?.slides.length}>
+              <Plus size={16} /> {activeJob?.type === 'flashcards' ? 'Oluşturuluyor…' : deckKind === 'llm' ? 'Yapay Zeka ile Oluştur' : 'Dersten deste oluştur'}
             </button>
           </div>
           {deckKind === 'static' ? (
-            <small className="health-hint">Mevcut anlatıdan anında, ücretsiz ve deterministik olarak üretilir — LLM çağrısı yapılmaz.</small>
+            <small className="health-hint">Dersindeki başlık ve açıklamalardan kartlar oluşturur. Ücretsizdir; ek bir yapay zeka çağrısı yapmaz.</small>
           ) : (
             <div className="deck-llm-options">
               <div className="provider-tabs compact">
@@ -1594,149 +1483,70 @@ export default function App() {
               <ProgressStrip job={activeJob?.type === 'flashcards' || jobState?.kind === 'flashcards' ? jobState : null} />
             </div>
           )}
+          <button className="button ghost" disabled={flashcardBusy || !newDeckName.trim()} onClick={async () => {
+            setFlashcardBusy(true)
+            try {
+              const deck = await api(`/api/projects/${project.id}/flashcards/blank`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newDeckName }),
+              })
+              setActiveDeck(deck)
+              setNewDeckName('')
+            } catch (error) { setToast({ type: 'error', text: error.message }) }
+            finally { setFlashcardBusy(false) }
+          }}><Plus size={16} /> Boş deste oluştur · elle ekle / içe aktar</button>
+          </div></details>
+          <section className="panel deck-library">
+          <div className="panel-toolbar"><div><span className="kicker">TEKRAR ZAMANI</span><h3>Destelerin</h3></div><span className="memory-pill">{flashcardDecks.reduce((sum, deck) => sum + deck.summary.dueCount, 0)} kart sırada</span></div>
+          <label className="search-field"><Search size={16} /><input aria-label="Destelerde ara" value={deckQuery} onChange={(e) => setDeckQuery(e.target.value)} placeholder="Deste adıyla ara…" /></label>
           <div className="deck-list">
             {flashcardBusy && flashcardDecks.length === 0 && <small className="health-hint">Yükleniyor…</small>}
             {!flashcardBusy && flashcardDecks.length === 0 && (
-              <EmptyState icon={Layers3} title="Henüz deste yok">Yukarıdan ilk desteni oluştur.</EmptyState>
+              <EmptyState icon={Layers3} title="Henüz deste yok">Yeni deste oluştur alanından ilk desteni ekle.</EmptyState>
             )}
-            {flashcardDecks.map((deck) => (
-              <div key={deck.id} className="deck-card" onClick={() => openFlashcardDeck(deck.id)}>
-                <Layers3 size={20} />
+            {flashcardDecks.length > 0 && !flashcardDecks.some((deck) => matches(deck.name, deckQuery)) && <p className="list-empty">Eşleşen deste yok.</p>}
+            {flashcardDecks.filter((deck) => matches(deck.name, deckQuery)).map((deck) => (
+              <div key={deck.id} className="deck-card">
+                <button className="deck-open" disabled={flashcardBusy} onClick={() => openFlashcardDeck(deck.id)}>
+                <Layers3 size={24} />
                 <span className="deck-card-main">
                   <strong>{deck.name}</strong>
                   <small>{deck.kind === 'llm' ? 'YZ destekli' : 'Statik'} · {deck.summary.totalCards} kart · {deck.summary.dueCount} bugün sırada</small>
                 </span>
-                <button className="icon-button danger" title="Desteyi sil" onClick={(e) => { e.stopPropagation(); deleteFlashcardDeck(deck.id) }}><Trash2 size={14} /></button>
+                <ChevronRight size={17} /></button>
+                <button className="icon-button danger" aria-label={`${deck.name} destesini sil`} title="Desteyi sil" onClick={(e) => { e.stopPropagation(); deleteFlashcardDeck(deck.id) }}><Trash2 size={14} /></button>
               </div>
             ))}
-          </div>
+          </div></section>
         </div>
-        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+        {toast && <div role={toast.type === 'error' ? 'alert' : 'status'} className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button aria-label="Bildirimi kapat" onClick={() => setToast(null)}><X size={16} /></button></div>}
       </div>
     )
   }
 
   if (view === 'anki' && activeDeck) {
-    return (
-      <div className="dashboard-shell">
-        <AmbientBackdrop />
-        <button className="button quiet hub-back" onClick={reviewCard ? endReviewSession : closeFlashcardDeck}><ArrowLeft size={16} /> {reviewCard ? 'Desteye dön' : 'Destelere dön'}</button>
-        {!reviewCard ? (
-          <>
-            <div className="dashboard-hero">
-              <span className="kicker">DESTE</span>
-              <h1>{activeDeck.name}</h1>
-              <p>Aralıklı tekrar (SM-2 — Anki'nin de temel aldığı algoritma) ile çalış; kartlar ne kadar iyi hatırladığına göre otomatik programlanır.</p>
-            </div>
-            <div className="anki-overview">
-              <div className="anki-stats">
-                <div className="anki-stat"><strong>{activeDeck.summary?.dueCount ?? 0}</strong><small>bugün sırada</small></div>
-                <div className="anki-stat"><strong>{activeDeck.summary?.newCount ?? 0}</strong><small>yeni</small></div>
-                <div className="anki-stat"><strong>{activeDeck.summary?.totalCards ?? 0}</strong><small>toplam kart</small></div>
-                <div className="anki-stat"><strong>{activeDeck.summary?.suspendedCards ?? 0}</strong><small>askıda</small></div>
-              </div>
-              <div className="anki-actions">
-                <button className="button primary" onClick={startReviewSession} disabled={!activeDeck.summary?.dueCount || flashcardBusy}>
-                  <WandSparkles size={16} /> Çalışmaya başla ({activeDeck.summary?.dueCount ?? 0})
-                </button>
-                {activeDeck.kind === 'static' && (
-                  <button className="button ghost" onClick={regenerateActiveDeck} disabled={flashcardBusy}>
-                    <RefreshCw size={16} /> Kaynaktan yeniden oluştur
-                  </button>
-                )}
-                <a className="button ghost" href={`/api/projects/${project.id}/flashcards/decks/${activeDeck.id}/export`}>
-                  <Download size={16} /> Anki'ye Aktar (.txt)
-                </a>
-              </div>
-              <div className="anki-card-list">
-                {activeDeck.cards.map((card) => editingCardId === card.id ? (
-                  <div key={card.id} className="anki-card-edit-row">
-                    <textarea rows="2" value={editDraft.front} onChange={(e) => setEditDraft({ ...editDraft, front: e.target.value })} placeholder="Ön yüz" />
-                    <textarea rows="2" value={editDraft.back} onChange={(e) => setEditDraft({ ...editDraft, back: e.target.value })} placeholder="Arka yüz" />
-                    <div className="anki-card-edit-actions">
-                      <button className="button primary compact" onClick={saveEditCard} disabled={!editDraft.front.trim() || !editDraft.back.trim()}>Kaydet</button>
-                      <button className="button ghost compact" onClick={cancelEditCard}>İptal</button>
-                    </div>
-                  </div>
-                ) : (
-                  <div key={card.id} className={`anki-card-row ${card.suspended ? 'suspended' : ''}`}>
-                    <span className="anki-card-kind">{card.kind === 'cloze' ? 'Boşluk' : 'Temel'}</span>
-                    <span className="anki-card-front">{card.front}{card.manual && <em className="manual-badge">elle</em>}</span>
-                    <small>{card.repetitions === 0 ? 'yeni' : `${card.repetitions} tekrar`}</small>
-                    <span className="anki-card-row-actions">
-                      {card.sourceSlideIndex !== null && card.sourceSlideIndex !== undefined && (
-                        <button className="icon-button" title="Kaynağa git" onClick={() => goToCardSource(card)}><ExternalLink size={13} /></button>
-                      )}
-                      <button className="icon-button" title="Düzenle" onClick={() => startEditCard(card)}><Pencil size={13} /></button>
-                      <button className="icon-button danger" title="Kartı sil" onClick={() => deleteFlashcardCard(card.id)}><Trash2 size={13} /></button>
-                      <button className="button quiet compact" onClick={() => toggleCardSuspend(card)}>
-                        {card.suspended ? 'Aktif et' : 'Askıya al'}
-                      </button>
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {showAddCard ? (
-                <div className="anki-card-edit-row">
-                  <textarea rows="2" value={newCardFront} onChange={(e) => setNewCardFront(e.target.value)} placeholder="Ön yüz" />
-                  <textarea rows="2" value={newCardBack} onChange={(e) => setNewCardBack(e.target.value)} placeholder="Arka yüz" />
-                  <div className="anki-card-edit-actions">
-                    <button className="button primary compact" onClick={addManualCard} disabled={!newCardFront.trim() || !newCardBack.trim()}>Kartı Ekle</button>
-                    <button className="button ghost compact" onClick={() => { setShowAddCard(false); setNewCardFront(''); setNewCardBack('') }}>İptal</button>
-                  </div>
-                </div>
-              ) : (
-                <button className="button ghost compact" onClick={() => setShowAddCard(true)}><Plus size={14} /> Elle Kart Ekle</button>
-              )}
-            </div>
-          </>
-        ) : (
-          <div className="review-session">
-            <div className="review-progress"><small>{reviewedCount} incelendi · {reviewQueue.length + 1} kart kaldı</small></div>
-            <div className="review-card">
-              <span className="review-card-kind">{reviewCard.kind === 'cloze' ? 'Boşluk Doldurma' : 'Temel Kart'}</span>
-              <p className="review-front">{reviewCard.front}</p>
-              {reviewRevealed && <><hr /><p className="review-back">{reviewCard.back}</p></>}
-            </div>
-            {!reviewRevealed ? (
-              <button className="button primary review-reveal" onClick={() => setReviewRevealed(true)}>Cevabı Göster <kbd>Boşluk</kbd></button>
-            ) : (
-              <div className="review-ratings">
-                <button className="button rating-again" onClick={() => submitReviewRating('again')}>Tekrar <kbd>1</kbd></button>
-                <button className="button rating-hard" onClick={() => submitReviewRating('hard')}>Zor <kbd>2</kbd></button>
-                <button className="button rating-good" onClick={() => submitReviewRating('good')}>İyi <kbd>3</kbd></button>
-                <button className="button rating-easy" onClick={() => submitReviewRating('easy')}>Kolay <kbd>4</kbd></button>
-              </div>
-            )}
-            <div className="review-footer">
-              {reviewUndo && <button className="button ghost compact" onClick={undoLastReview}>Geri Al <kbd>Z</kbd></button>}
-              <button className="button quiet" onClick={endReviewSession}>Oturumu bitir</button>
-            </div>
-          </div>
-        )}
-        {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
-      </div>
-    )
+    return <FlashcardWorkspace key={activeDeck.id} projectId={project.id} initialDeck={activeDeck}
+      api={api} onClose={closeFlashcardDeck} onSource={goToCardSource} />
   }
 
   return (
     <div className="app-shell">
-      <AmbientBackdrop disabled={video.ttsProvider === 'coqui'} />
+
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark"><Sparkles size={20} /></span><span><strong>Ders Stüdyosu</strong><small>LOCAL CREATION SUITE</small></span></div>
+        <div className="brand"><span className="brand-mark"><BookOpen size={20} /></span><span><strong>Ders Stüdyosu</strong><small>Ders çalışma alanı</small></span></div>
+        <nav className="sidebar-links" aria-label="Çalışma alanları"><button onClick={() => setView('dashboard')}><FolderOpen size={17} /> Projeler</button><button onClick={() => setView('hub')}><BookOpen size={17} /> Projeye genel bakış</button><button onClick={() => setView('anki')} disabled={!project}><Layers3 size={17} /> Flashcard</button></nav>
         <nav className="step-nav" aria-label="Üretim adımları">
           {steps.map((item) => {
             const Icon = item.icon
             const active = stage === item.id
             const done = (item.id === 'source' && project) || (item.id === 'script' && project?.slides.length) || (item.id === 'video' && project?.outputs?.video)
-            return <button key={item.id} className={`${active ? 'active' : ''} ${done ? 'done' : ''}`} onClick={() => setStage(item.id)} disabled={item.id !== 'source' && !project}>
+            return <button key={item.id} aria-current={active ? 'step' : undefined} className={`${active ? 'active' : ''} ${done ? 'done' : ''}`} onClick={() => setStage(item.id)} disabled={item.id !== 'source' && !project}>
               <span className="nav-number">{done ? <Check size={14} /> : item.eyebrow}</span><Icon size={18} /><span>{item.label}</span><ChevronRight size={15} />
             </button>
           })}
         </nav>
         <div className="project-card">
-          <div className="project-card-heading"><span>AKTİF PROJE</span><span>{completion}%</span></div>
-          {project ? <><strong>{project.id}</strong><small>{project.sections.length} bölüm · {project.slides.length} slayt</small><div className="mini-progress"><span style={{ width: `${completion}%` }} /></div></> : <p>Yeni bir kaynak ekleyerek başla.</p>}
+          <div className="project-card-heading"><span>AKTİF PROJE</span><span>{project?.outputs?.video ? <Check size={14} /> : null}</span></div>
+          {project ? <><strong title={project.id}>{projectLabel(project.id)}</strong><small>{project.sections.length} bölüm · {project.slides.length} slayt</small></> : <p>Yeni bir kaynak ekleyerek başla.</p>}
         </div>
         {bootstrap.projects.length > 0 && <label className="project-picker"><span>Son projeler</span><select value={project?.id || ''} onChange={(event) => event.target.value && loadProject(event.target.value)}><option value="">Proje seç…</option>{bootstrap.projects.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}</select></label>}
         <div className="local-badge"><span className="status-dot" /><span><strong>Yerel ve hazır</strong><small>Veriler bu bilgisayarda</small></span></div>
@@ -1744,8 +1554,8 @@ export default function App() {
 
       <main className="main-shell">
         <header className="topbar">
-          <div><span className="topbar-eyebrow">{steps.find((item) => item.id === stage)?.eyebrow} / PIPELINE</span><h1>{stage === 'source' ? 'İçeriği seç ve yapılandır' : stage === 'script' ? 'Anlatıyı tasarla' : 'Dersi yayına hazırla'}</h1></div>
-          <div className="topbar-meta"><button className="button quiet compact" onClick={() => setView('hub')}><ArrowLeft size={15} /> Panele dön</button><span><span className="status-dot" /> Pipeline bağlı</span><button className="icon-button" title="Kullanım / maliyet" onClick={() => setShowCost(true)}><Wallet size={18} /></button><button className="icon-button" title="Toplu kuyruk" onClick={() => setShowQueue(true)}><ListOrdered size={18} /></button><button className="icon-button" title="Telaffuz sözlüğü" onClick={() => setShowPronunciation(true)}><Settings2 size={18} /></button></div>
+          <div><span className="topbar-eyebrow">{steps.find((item) => item.id === stage)?.eyebrow} / DERS HAZIRLAMA</span><h1>{stage === 'source' ? 'İçeriği seç ve yapılandır' : stage === 'script' ? 'Anlatıyı tasarla' : 'Dersi yayına hazırla'}</h1></div>
+          <div className="topbar-meta"><button className="button quiet compact" onClick={() => setView('hub')}><ArrowLeft size={15} /> Proje</button><button className="icon-button" title="Kullanım / maliyet" onClick={() => setShowCost(true)}><Wallet size={18} /></button><button className="icon-button" title="Toplu kuyruk" onClick={() => setShowQueue(true)}><ListOrdered size={18} /></button><button className="icon-button" title="Telaffuz sözlüğü" onClick={() => setShowPronunciation(true)}><Settings2 size={18} /></button><ThemeToggle /></div>
         </header>
         <div className="stage-content">
           {stage === 'source' && renderSource()}
@@ -1754,12 +1564,12 @@ export default function App() {
         </div>
         <footer className="stage-footer">
           <button className="button quiet" disabled={stage === 'source'} onClick={() => setStage(stage === 'video' ? 'script' : 'source')}><ArrowLeft size={16} /> Önceki adım</button>
-          <span>Her değişiklik otomatik olarak proje klasörüne kaydedilir.</span>
+          <span>{draftDirty ? 'Düzenlediğin slaytı Kaydet ile projene işle.' : 'Projelerin bu bilgisayarda saklanır.'}</span>
           <button className="button quiet" disabled={stage === 'video' || (stage === 'source' && !project)} onClick={() => setStage(stage === 'source' ? 'script' : 'video')}>Sonraki adım <ArrowRight size={16} /></button>
         </footer>
       </main>
 
-      {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button onClick={() => setToast(null)}><X size={16} /></button></div>}
+      {toast && <div role={toast.type === 'error' ? 'alert' : 'status'} className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <CheckCircle2 size={18} /> : <CircleAlert size={18} />}</span><p>{toast.text}</p><button aria-label="Bildirimi kapat" onClick={() => setToast(null)}><X size={16} /></button></div>}
 
       {showPronunciation && <div className="modal-backdrop" onClick={() => setShowPronunciation(false)}>
         <div className="modal-card" onClick={(event) => event.stopPropagation()}>
