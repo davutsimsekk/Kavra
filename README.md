@@ -1,142 +1,136 @@
-# Kavra
+<p align="center">
+  <img src="branding/kavra-lockup.png" alt="Kavra" width="360">
+</p>
 
-MD / PPTX / PDF dosyasını, gerçek bir hocanın tahtada anlattığı gibi **sesli ve görüntülü ders videosuna** çeviren, tamamen yerel (D: sürücüsünde) çalışan bir araç.
+<p align="center">
+  Kaynak materyalini (PDF, PowerPoint, Markdown) sesli-görüntülü ders videosuna, flashcard destesine,<br>
+  sınava ve çalışma planına dönüştüren yerel bir öğrenme stüdyosu.
+</p>
 
-Başka bir bilgisayara kurulum için hazır Docker/Compose paketi ve Docker dışı
-kurulum komutları: [DOCKER.md](DOCKER.md).
+---
 
-## Neden bu şekilde tasarlandı
+Kavra; bir dersin PDF/PPTX/Markdown kaynağını alır, önce bir LLM ile **kavramsal bir ders anlatımına**
+dönüştürür (ham metni ya da kod/tablo sembollerini olduğu gibi okumaz), sonra bunu seslendirip
+görsel slaytlarla senkronize bir MP4'e render eder. Aynı kaynaktan flashcard destesi, sınav ve
+çalışma takibi de üretilebilir — hepsi tek bir ders projesinin içinde.
 
-- **C: sürücüsünde neredeyse hiç boş alan yok** (kurulum sırasında birkaç yüz MB'a kadar düştü). Bu yüzden Python sanal ortamı, tüm pip/torch/huggingface önbellekleri, indirilen ses modelleri ve geçici dosyalar **D:\proje\ders_video** altında tutulur. `run_gui.bat` ve `d_env.sh` bu ortam değişkenlerini otomatik ayarlar — elle bir şey yapmana gerek yok, ama kendi terminalinden bir şey çalıştırırsan önce `source d_env.sh` (bash) çalıştır.
-- Ham metni doğrudan seslendirmek yerine önce bir **LLM ile "ders anlatım script'ine"** çevrilir (kod/tablo/markdown sembollerini olduğu gibi okumak yerine kavramsal, doğal bir anlatım üretir).
-- Not: Kurulum sırasında iki kütüphane (huggingface `xet` önbelleği ve coqui-tts'in kendi model önbelleği) `HF_HOME`'u yok sayıp varsayılan olarak C'ye yazmaya çalıştı; ikisi de artık `HF_HUB_DISABLE_XET` ve `TTS_HOME` ile D'ye sabitlendi (bkz. `d_env.sh` / `app/config.py`). Yeni bir kütüphane eklersen aynı riske dikkat et: bazı kütüphaneler `HF_HOME`/`XDG_CACHE_HOME` dışında kendi env değişkenini kullanır.
+## Öne çıkanlar
 
-## Kurulum durumu (bu oturumda tamamlandı)
+- **Ders videosu üretimi** — PDF/PPTX/Markdown kaynağından, altyazılı ve temalı bir MP4. Slayt
+  metni değişmediği sürece render önbellekten gelir; yalnızca değişen slaytlar yeniden üretilir.
+- **PDF sayfasını birebir anlat** veya kaynağı yeniden tasarlanmış slaytlara çevir.
+- **Çok kaynaklı ders projeleri** — bir derse birden fazla dosya ekle, istediğin kaynak
+  kombinasyonundan ayrı video/flashcard/sınav üret. Ayrıntı: [COURSE_PROJECTS.md](COURSE_PROJECTS.md).
+- **Flashcard çalışma masası** — Anki benzeri öğrenme adımları, günlük limitler, geri alma,
+  cloze kartlar. Ayrıntı: [FLASHCARD_GUIDE.md](FLASHCARD_GUIDE.md).
+- **Sınav hazırlama** — şıklı/klasik/karma sınav, çözme ekranı, cevap anahtarı. Ayrıntı:
+  [EXAM_GUIDE.md](EXAM_GUIDE.md).
+- **Çalışma takibi** — görev/klasör hiyerarşisi, Pomodoro, süre raporları; yapay zekâ kullanmaz.
+  Ayrıntı: [STUDY_TRACKER_GUIDE.md](STUDY_TRACKER_GUIDE.md).
+- **Altı LLM/TTS sağlayıcı seçeneği** — bulut, yerel veya kendi Agent CLI'n; aşağıdaki tabloya bak.
+- **Uzak GPU desteği** — GPU'suz bir sunucuda çalıştırıp XTTS v2/Piper seslendirmesini kendi
+  bilgisayarına veya Colab'a devredebilirsin. Ayrıntı: [REMOTE_TTS.md](REMOTE_TTS.md).
+- **Docker ile taşınabilir** — bir VPS'e veya başka bir bilgisayara Docker Compose ile kurulur.
+  Ayrıntı: [DOCKER.md](DOCKER.md).
 
-- `venv/` — Python sanal ortamı (D: üzerinde)
-- Kurulu: Pillow, edge-tts, python-pptx, pymupdf, pygments, python-dotenv, requests, onnxruntime, piper-tts, google-genai, FastAPI ve Uvicorn
-- Modern arayüz: React 19 + Vite + Three.js; production build `webui/dist/` altında hazırdır.
-- `models/piper/dfki/` — offline Türkçe Piper ses modeli (indirildi, hazır)
-- Coqui XTTS v2 (opsiyonel, offline + ses klonlama): `install_coqui.py` ile kuruldu, bağımlılık çakışmaları çözüldü, model indirildi (D:'de, ~1.9GB, `_cache/tts_home`). **Ancak** bu makinede modeli belleğe yüklerken (RAM ~15GB, o an ~4-5GB boştu) iki kez "sistem bellek yetersiz" nedeniyle kesildi — muhtemelen XTTS v2'nin yüklenmesi ~3-5GB boş RAM istiyor. Diğer ağır programları (tarayıcı, IDE) kapatıp `venv\Scripts\python.exe test_coqui_voice.py` ile tekrar dene. Çalışırsa GUI'de "coqui" sağlayıcısı doğrudan kullanılabilir; çalışmazsa Edge-TTS veya Piper'la devam et, ikisi de zaten tam kalitede çalışıyor.
+## Hızlı başlangıç
 
-## Nasıl çalıştırılır
+### Docker ile (önerilen — VPS, başka bir bilgisayar veya yerelde)
 
-Önerilen modern **masaüstü uygulaması** için çift tıkla: **`run_gui.bat`**. React arayüzü, adres çubuğu ve tarayıcı sekmeleri olmayan ayrı bir Microsoft Edge/Google Chrome uygulama penceresinde açılır. Yerel servis yalnızca `127.0.0.1:8768` üzerinde çalışır; masaüstü ve web aynı API'yi ve aynı özellikleri kullanır.
-
-Normal tarayıcı sekmesinde açmak için **`run_web.bat`**, eski Tkinter arayüzüne dönmek için **`run_legacy_gui.bat`** kullanılabilir.
-
-Ya da terminalden:
+```bash
+git clone <repo-url> kavra && cd kavra
+cp .env.example .env        # istersen GEMINI_API_KEY / OPENAI_API_KEY ekle
+docker compose up -d --build
 ```
-source d_env.sh   # (PowerShell kullanıyorsan aşağıdaki env değişkenlerini elle set et)
-venv/Scripts/python.exe gui/app_gui.py
+
+Arayüz: `http://127.0.0.1:8768`. GPU'suz bir sunucuya kuruyorsan `.env`'e `KAVRA_LOCAL_TTS=0` ekle
+(ağır TTS motorları kurulmaz, Edge-TTS/Piper yeterli olur; XTTS v2 için [REMOTE_TTS.md](REMOTE_TTS.md)'ye bak).
+Sunucuda/VPS'te çalıştırmanın tam adımları (Tailscale, güvenlik, mevcut siteyle birlikte
+çalıştırma): [DOCKER.md](DOCKER.md).
+
+### Windows'ta yerel kurulum
+
+Gereken: Python 3.14, Node.js 22+, FFmpeg.
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-tts.txt   # isteğe bağlı: XTTS v2/Anka için (CUDA gerektirir)
+npm --prefix webui ci
+npm --prefix webui run build
 ```
 
-### Adım adım kullanım
+Sonra **`run_web.bat`**'ı çift tıkla (tarayıcı sekmesinde açar) veya **`run_gui.bat`**'ı çift tıkla
+(ayrı bir masaüstü uygulama penceresinde açar). İkisi de aynı API'yi ve özellikleri kullanır.
+Linux/macOS/Git Bash için `run_web.sh` kullanılabilir; CUDA olmayan makinelerde `requirements-tts.txt`
+kurmana gerek yok, Edge-TTS ve Piper zaten çekirdek kurulumla çalışır.
 
-1. **1. Kaynak** sekmesi: `.md` / `.pptx` / `.pdf` dosyanı seç → **İçeriği Ayır**. Bölümler işaretli bir tabloda görünür; bir satıra tıklayarak açıp kapatabilir, **Tümünü Seç / Seçimi Temizle** düğmelerini ve görünür seçili bölüm sayacını kullanabilirsin. Script üretimi yalnızca açıkça işaretli bölümleri kullanır.
-2. **2. Anlatım Metni** sekmesi: Dört yol var:
-   - **Gemini API (otomatik):** `aistudio.google.com/apikey` adresinden ücretsiz bir anahtar al, yapıştır, **Kaydet**, model seç (varsayılan `gemini-3.5-flash-lite`). Sonra **Script Üret**. 429 (rate limit) alırsan otomatik üstel bekleme ile tekrar dener; kota gerçekten 0 ise (proje askıya alınmışsa) bunu hemen anlaşılır bir mesajla bildirir.
-   - **OpenAI uyumlu API:** Resmî OpenAI için varsayılan endpoint'i bırak (`https://api.openai.com/v1/chat/completions`), API anahtarını ve model adını gir. OpenRouter, LM Studio, Ollama veya başka bir OpenAI-uyumlu servis kullanıyorsan endpoint/base URL ile o servisteki model kimliğini yazabilirsin. Base URL girilirse `/chat/completions` otomatik eklenir; yerel ve anahtarsız bir sunucuda API key boş bırakılabilir. Anahtar `.env` içinde, endpoint ve model ise `settings.json` içinde saklanır. OpenRouter için uzun Türkçe derste kalite/fiyat dengesi doğrulanan `openai/gpt-5.6-luna` seçilidir; OpenRouter çağrılarında geçersiz/yarım JSON riskini azaltan katı şema ve aşırı yavaş sağlayıcıları önleyen throughput yönlendirmesi kullanılır.
-   - **Agent CLI (önerilen, kota derdi yok):** Bilgisayarında kurulu bir CLI ajanı (Claude Code, Gemini CLI, vb.) varsa, API anahtarına gerek kalmadan onu arka planda çağırır. Claude Code kullanıldığında parçalar varsayılan olarak aynı mantıksal Claude oturumunda (`--session-id` / `--resume`) işlenir; böylece önceki parçaların terminolojisi ve akışı korunur. Güvenilirlik için varsayılan parça boyutu 4 bölüm, timeout 900 saniyedir; ikisi de arayüzden değiştirilebilir. Komut kutusunu de düzenleyebilirsin (ör. `claude -p --model haiku --output-format json --restricted`).
-   - **Manuel (herhangi bir LLM ile):** **Prompt'u Panoya Kopyala** → istediğin bir sohbet arayüzüne (Gemini web, ChatGPT, Claude...) yapıştır → dönen JSON'u bir dosyaya kaydet → **Manuel JSON Dosyası Yükle**.
-   - Otomatik sağlayıcılarda **Tek istekte gönder** kutusunu işaretlersen seçili kaynak bölümlerinin tamamı tek LLM çağrısında işlenir. Tek çağrıda `session/resume` gerekmediği için bu ayarlar otomatik olarak devre dışı kalır. İşaretlemezsen **bir LLM çağrısındaki kaynak bölümü** ayarı, PDF/PPT'den aynı çağrıya en fazla kaç bölüm konacağını belirler; bu üretilen slayt sayısı değildir. Claude session seçeneği açıksa bu ayrı çağrıların tamamı `--resume` ile aynı mantıksal konuşmada devam eder.
-   - Gemini ve OpenAI uyumlu API çağrıları sunucu tarafında oturum tutmaz. Uygulama bu nedenle her parçaya önceki slayt başlıkları ile son slaytların kısa özetinden oluşan kompakt bir **ders hafızası** ekler. Daha önce elle düzenlediğin veya kaydettiğin slaytlar da bu hafızaya dahildir; böylece API parçaları terminoloji ve akış bakımından birbirinden kopmaz.
-   - Üretilen slaytları düzenleyebilir, silebilir, yenisini seçili slayttan sonra ekleyebilir ve **Yukarı / Aşağı** düğmeleriyle sıralayabilirsin. Yeni üretimi listenin sonuna veya seçili slayttan hemen sonraya yerleştirebilirsin. İlerleme çubuğu o anki parçayı gösterir; başarıyla biten her parça `script.json` dosyasına kaydedilir. Elle yapılan düzenlemeler Kaydet ile diske yazılır.
-   - **Kaldığı yerden devam et** açıkken her başarılı LLM çağrısının kaynak parmak izleri `generation_checkpoint.json` dosyasına yazılır. Kota/timeout/uygulama kapanması sonrası aynı bölümler yeniden gönderilmez; yalnızca kalanlar üretilir. Claude session kimliği de aynı komut için saklanır. Kaynak metni değişirse parmak izi değiştiği için o bölüm otomatik olarak yeniden bekleyen duruma döner. Bilerek tekrar üretmek için resume'u kapatabilir veya yalnızca ilerleme işaretlerini sıfırlayabilirsin; mevcut slaytlar silinmez.
-   - **Script'i Kaydet** ile `projects/<proje>/script.json` dosyasına yazılır (istersen elle de düzenleyebilirsin, düz JSON).
-3. **3. Ses ve Video** sekmesi: TTS sağlayıcısını ve sesi seç; görsel tema, altyazı, geçiş ve yakınlaştırma seçeneklerini ayarla; **Videoyu Oluştur**. **Temayı Önizle** ile video üretmeden önce seçili slaydın görünümünü kontrol edebilirsin. Bitince **Videoyu Oynat** veya **Çıktı Klasörünü Aç**.
+## LLM sağlayıcıları (anlatı üretimi)
 
-Her slayt için üretilen ses/görüntü/segment `projects/<proje>/assets/` altında saklanır ve **içerik değişmediği sürece tekrar üretilmez** (hash tabanlı önbellek) — yani bir slaytın metnini düzeltip videoyu tekrar oluşturduğunda sadece o slayt yeniden render edilir.
+| Sağlayıcı | Not |
+|---|---|
+| **Gemini API** | Ücretsiz kotalı; `aistudio.google.com/apikey`'den anahtar al. |
+| **OpenAI uyumlu API** | OpenAI, OpenRouter, LM Studio, Ollama veya başka bir uyumlu servis. |
+| **Agent CLI** | Bilgisayarında kurulu bir CLI ajanı (ör. Claude Code) varsa API anahtarı gerekmez. |
+| **Manuel** | Prompt'u kopyala, istediğin sohbet arayüzüne yapıştır, dönen JSON'u yükle. |
 
-### Çok kaynaklı ders projeleri
-
-Web arayüzünde artık bir proje bir dersi temsil eder. Aynı derse birden fazla PDF/PPTX/Markdown dosyası yüklenebilir; seçilen bir kaynaktan ayrı video veya sıralanmış birkaç kaynaktan birleşik video hazırlanabilir. Her video kendi anlatı ve çıktı dosyalarını tutar. Flashcard desteleri doğrudan seçilen bir veya birden fazla kaynaktan üretilebilir.
-
-Başlamak için **Ders projesi oluştur** düğmesini kullan. Eski projeler korunur. Kullanım, depolama ve maliyet sınırları: [COURSE_PROJECTS.md](COURSE_PROJECTS.md).
-
-### Modern React arayüzü
-
-- Üç aşamalı düzen: **Kaynak → Anlatı → Stüdyo**
-- Dosya sürükle-bırak veya yerel dosya yolu, görünür bölüm seçimleri ve proje geçmişi
-- Agent/Gemini/OpenAI ayarları, ders hafızası ve canlı iş ilerlemesi
-- Sürükle-bırak slayt sıralama, araya ekleme, silme ve ayrıntılı master-detail editör
-- Yedi tema, gerçek render önizlemesi, TTS/effect ayarları ve video oynatıcı
-- Açık / koyu / sistem teması; görünüm tercihi cihazda hatırlanır. WebGL ve 3D arka plan kullanılmaz.
-- Telefon, tablet ve masaüstüne uyarlanan proje kitaplığı; proje, kaynak bölümü, slayt ve deste araması.
-- Anlatı ayarları ve PDF seçenekleri açılır panellerde; düzenleyici anlatım metnine öncelik verir.
-- Slayt düzenlemeleri Kaydet veya Ctrl+S ile diske yazılır. Kaydedilmemiş taslaklar tarayıcıda korunur; hatalı kayıt başarılı gösterilmez.
-- API anahtarları tarayıcıya geri gönderilmez; yalnızca yapılandırılmış olup olmadıkları gösterilir.
-- `.env` Git tarafından yok sayılır. Kayıtlı bir uzak API anahtarı localhost LLM endpoint'lerine otomatik olarak gönderilmez.
-- `run_gui.bat`, bu arayüzü ayrı bir masaüstü uygulama penceresinde açar; resume, OpenRouter, slayt editörü, tema önizlemesi ve izole TTS/render davranışı web ile masaüstünde birebir aynıdır.
-
-Frontend geliştirme modu için `run_web_dev.bat`; production build yenilemek için `cd webui && npm run build` kullanılabilir.
-
-## Ses (TTS) sağlayıcıları — karşılaştırma
+## TTS sağlayıcıları (seslendirme)
 
 | Sağlayıcı | Kalite | Çevrimiçi mi | Not |
 |---|---|---|---|
-| **edge** (önerilen, varsayılan) | Yüksek, çok doğal | Kısa bir internet isteği gerekir | Ücretsiz, API key yok. Sesler: `tr-TR-AhmetNeural`, `tr-TR-EmelNeural` |
-| **piper** | Orta | Tamamen offline | `models/piper/dfki` sesi hazır kurulu. Kelime zamanlaması yok → altyazı süresi tahmini olarak hesaplanır |
-| **elevenlabs** | En doğal | Bulut, API key gerekir | Ücretsiz kota çok sınırlı (~10 dk/ay). `elevenlabs.io`'dan key al |
-| **coqui** (XTTS v2) | Yüksek + ses klonlama | Tamamen offline (ilk indirme hariç) | GPU varsa (bu makinede RTX 4060) **otomatik kullanılır** ve CPU'ya göre **~3.8x daha hızlı** (11s vs 41s, ölçüldü) — ayrıca CPU'da yaşanan "bellek yetersiz" çökmesi GPU'da hiç olmuyor. **CPML lisansı: kişisel/akademik kullanım serbest, ticari kullanım ayrı lisans ister** (coqui.ai/cpml) |
-| **anka** (Anka TTS) | Yüksek + ses klonlama, **Türkçe'ye özel eğitildi** | Tamamen offline (ilk indirme hariç) | Aynı 8 gerçek ders metniyle, aynı makinede XTTS v2'ye karşı ölçüldü: **~2.35x daha hızlı** (2.80x vs 1.19x realtime), **~1/3 VRAM** (~1GB vs ~2.8GB), ve XTTS'in bilinen Türkçe 226-karakter kesilme uyarısını hiç vermiyor. Referans ses klonlamak için XTTS'ten farklı olarak sesin BİREBİR yazılı transkriptini de ister (bkz. `app/tts/anka_provider.py`). **CC-BY-NC-4.0 lisansı: yalnızca kişisel/araştırma kullanımı, ticari kullanım ayrı lisans ister** (huggingface.co/krmkayabasi/Anka-TTS) |
+| **edge** (varsayılan) | Yüksek, doğal | Kısa internet isteği | Ücretsiz, API key yok |
+| **piper** | Orta | Tamamen offline | Hafif ve hızlı, CPU'da bile hızlı |
+| **elevenlabs** | En doğal | Bulut, API key gerekir | Ücretsiz kota sınırlı |
+| **coqui** (XTTS v2) | Yüksek, ses klonlama | Offline (ilk indirme hariç) | GPU önerilir; CPML lisansı — ticari kullanım ayrı lisans ister |
+| **anka** | Yüksek, Türkçe'ye özel eğitildi | Offline (ilk indirme hariç) | XTTS'ten hızlı; CC-BY-NC-4.0 — yalnızca kişisel/araştırma |
+| **chatterbox** | Yüksek, ses klonlama, çok dilli | Offline (ayrı ortam) | GPU gerekir, ayrı bir Python ortamında çalışır |
 
-**GPU notu:** `CoquiTTSProvider`/`AnkaTTSProvider`, GPU'yu otomatik algılar; elle `gpu=False`/`device="cpu"` vererek CPU'ya zorlayabilirsin. `install_coqui.py`/`install_anka.py` de `nvidia-smi` ile GPU'yu otomatik tespit edip uygun torch sürümünü kuruyor. **Önemli:** `anka-tts` paketi kurulumu sırasında `transformers`'ı coqui-tts'in çalışmadığı bir sürüme (5.x) yükseltiyor — `install_anka.py` bunu otomatik olarak coqui-uyumlu sürümlere geri sabitliyor, ikisi aynı venv'de bir arada çalışabiliyor (elle `pip install anka-tts[tts]` çalıştırırsan bu adımı unutma).
-
-**Türkçe TTS manzarası (2026-09 araştırması, güncellendi):** 2026'nın trend açık kaynak modelleri (Kokoro-82M, Chatterbox, Zonos, CosyVoice) esas olarak İngilizce odaklı, Türkçe desteği zayıf/yok. **Anka TTS**, Türkçe'ye özel fine-tune edilmiş bir F5-TTS türevi olarak bu boşluğu dolduruyor ve kendi/bizim ölçümlerimizde XTTS v2'den hem hızlı hem daha isabetli (WER %1.73 vs %3.34) çıktı — kişisel kullanım için önerilen sağlayıcı bu artık. **Chatterbox Multilingual** (500M, MIT lisans, Türkçe dahil 23+ dil) araştırıldı ama Türkçe'ye özel eğitilmemiş olması ve XTTS ile aynı boy sınıfında olması nedeniyle eklenmedi. **Piper** hâlâ en hafif/hızlı (offline, CPU'da bile 17x realtime) ama kalite orta.
-
-İstediğin an sağlayıcı değiştirip aynı script ile farklı bir ses deneyebilirsin.
+XTTS v2 ve Piper, GPU'suz bir sunucudan uzak bir GPU'ya (kendi bilgisayarın veya Colab) devredilebilir —
+bkz. [REMOTE_TTS.md](REMOTE_TTS.md). Lisans notları özet niyetinedir; ticari kullanım öncesi ilgili
+lisansı kendin doğrula.
 
 ## Video özellikleri
 
-- Modern slayt tasarımı: kart tabanlı içerik, başlık, numaralı maddeler, breadcrumb, slayt sayacı ve ilerleme çubuğu
-- **Otomatik tema:** bölüm slaytlarında Aurora, kod slaytlarında Gece Mavisi; normal slaytlarda dengeli açık temalar otomatik seçilir
-- Hazır presetler: **Beyaz Minimal**, **Notebook Açık**, **Gece Mavisi**, **Sıcak Kağıt**, **Mint Akademik**, **Aurora**
-- Her temada uyumlu gradyan/dekorasyon, metin kontrastı, kart yüzeyleri ve kod renklendirme stili
-- Kod blokları **Pygments ile sözdizimi renklendirmeli** gösterilir
-- Bölüm-arası büyük başlık slaytları (`level: "chapter"`)
-- Geçişlerde yumuşak **fade in/out** (video + ses)
-- Opsiyonel **Ken Burns** (hafif yakınlaştırma) efekti
-- Konuşmayla senkronize **gömülü altyazı** (Edge-TTS'in kelime zamanlaması kullanılır; diğer sağlayıcılarda karakter sayısına göre tahmin edilir). Kod içeren slaytlarda altyazı, kod kutusuyla çakışmaması için otomatik kapanır.
-
-## İngilizce/kod terimi telaffuz düzeltmesi
-
-Türkçe TTS motorları İngilizce kelimeleri (if, else, switch, pointer, struct...) Türkçe harf okuma kurallarıyla okuyunca kulağa çok kötü geliyor (ör. Türkçe'de "c" harfi /dʒ/ okunur, bu yüzden "case" veya "const" yanlış seslendirilir). `app/tts/pronunciation.py` içindeki bir sözlükle, SADECE seslendirmeye giden metinde bu kelimeler "kulağa yakın" fonetik Türkçe yazımla değiştiriliyor (ör. "switch" → "sviç", "break" → "breyk"); ekrandaki slayt/kod/altyazı metni her zaman orijinal (doğru) yazımla kalıyor. Bu liste kesin değil — bir kelime hâlâ kötü çıkıyorsa bana söyle, sözlüğe ekleyip düzeltirim (sesi kendim dinleyemediğim için senin geri bildirimin gerekiyor).
+- Kart tabanlı modern slayt tasarımı; altı hazır tema (Beyaz Minimal, Notebook Açık, Gece Mavisi,
+  Sıcak Kağıt, Mint Akademik, Aurora) ve içeriğe göre otomatik tema seçimi
+- Kod blokları Pygments ile sözdizimi renklendirmeli
+- Konuşmayla senkronize gömülü altyazı (Edge-TTS'te kelime bazlı, diğerlerinde tahmini)
+- Yumuşak geçişler, isteğe bağlı Ken Burns efekti
+- Slayt/ses/segment hash tabanlı önbellek: değişmeyen slaytlar yeniden render edilmez
+- İptal edilebilir render; uygulama yeniden başlasa da kaldığı yerden devam eder
 
 ## Bilinen sınırlamalar
 
-- **137 bölümlük dev bir rehberi tek seferde işlemek** hem LLM kotasını hem render süresini zorlar — bölüm bölüm (ör. önce "Bölüm 1: C Programlama Dili") ilerlemen önerilir.
-- PDF metin çıkarma, kaynağın fontuna bağlıdır; taranmış (image) PDF'lerde OCR yoktur, metin çıkmaz.
-- Piper/ElevenLabs/Coqui/Anka'da altyazı zamanlaması tahminidir (Edge-TTS kadar hassas değildir).
-- Coqui CPU'da yavaştır; büyük bir dersi Coqui ile üretmek saatler sürebilir.
-- Anka'da klonlanmış bir ses eklemek için XTTS'ten farklı olarak referans .wav'ın yanına birebir transkriptini içeren aynı isimli bir .txt de koymak gerekir (bkz. `app/tts/anka_provider.py`), yoksa açık bir hata verir.
+- Taranmış (image) PDF'lerde OCR yok; metin çıkmayan sayfalar boş kalır.
+- Piper/ElevenLabs/Coqui/Anka/Chatterbox'ta altyazı zamanlaması tahminidir (Edge-TTS kadar hassas değil).
+- Coqui/Chatterbox CPU'da yavaştır; büyük bir dersi GPU'suz üretmek saatler sürebilir.
+- Çok büyük bir kaynağı (100+ bölüm) tek seferde işlemek yerine bölüm bölüm ilerlemek önerilir.
+
+PDF görsel destekli anlatım kalitesi için planlanan iyileştirmeler: [YAPILACAKLAR.md](YAPILACAKLAR.md).
 
 ## Klasör yapısı
 
 ```
-ders_video/
+kavra/
   app/                  çekirdek Python paketi (parser, LLM, TTS, video, pipeline)
-  studio_web/desktop.py modern React masaüstü pencere başlatıcısı
-  gui/app_gui.py        eski/legacy Tkinter arayüzü
-  prompts/              LLM'e verilen "ders script'i" prompt şablonu
-  models/piper/         offline Türkçe ses modeli
-  projects/<ad>/        her kaynak dosya için: ham bölümler, script.json, assets/, ders.mp4/mp3
-  venv/                 Python sanal ortamı (D:)
-  _cache/               pip/hf/torch/temp önbellekleri (D:, C:'ye asla yazmaz)
-  install_coqui.py      opsiyonel Coqui XTTS v2 kurulumu
-  install_anka.py       opsiyonel Anka TTS kurulumu (Türkçe'ye özel, XTTS'ten hızlı)
-  run_gui.bat           modern masaüstü uygulamasını çift tıkla başlat
-  run_legacy_gui.bat    eski Tkinter arayüzünü başlat
+  studio_web/           FastAPI backend, render worker, uzak TTS rotaları
+  webui/                React arayüzü
+  tts_server/           uzak GPU sunucusu (bkz. REMOTE_TTS.md)
+  prompts/              LLM'e verilen ders anlatım prompt şablonu
+  models/               offline ses modelleri ve klon referansları (kullanıcı verisi)
+  projects/             ders/kaynak/video/flashcard/sınav verisi (kullanıcı verisi)
+  study_data/           çalışma takibi SQLite verisi (kullanıcı verisi)
+  Dockerfile, compose.yaml   taşınabilir kurulum
 ```
 
-## Gelişmiş flashcard çalışma masası
+## Belgeler
 
-Flashcard bölümüne günlük limitler, dakika bazlı öğrenme, kalıcı geri al, çoklu boşluk/ters kart, etiketli kart tarayıcısı, istatistikler ve TSV içe aktarma eklendi. Kullanım, kısayollar ve Anki ile farklar için [FLASHCARD_GUIDE.md](FLASHCARD_GUIDE.md) dosyasına bak.
-
-## Sınav hazırlama
-
-Ders projesindeki **Sınav hazırla** alanında seçili kaynaklardan şıklı, klasik veya karma sınav üretilebilir. Çıkmış sınavlar isteğe bağlı üslup/yapı örneği olarak yüklenir. Çözme ekranı, açıklamalı cevap anahtarı ve ayrı soru/cevap dışa aktarımı bulunur. Ayrıntılar: [EXAM_GUIDE.md](EXAM_GUIDE.md). PDF anlatım kalitesi için plan: [YAPILACAKLAR.md](YAPILACAKLAR.md).
-
-## Çalışma takip alanı
-
-Ana ekrandaki **Çalışma takibi** veya ders içindeki **Çalışmanı takip et** kartı üzerinden bağımsız/derse bağlı projeler, klasörler, görevler, Pomodoro, süre kayıtları ve raporlar kullanılabilir. Yerel veriler `study_data/study.sqlite3` içinde tutulur; yapay zekâ çağrısı yapılmaz. Ayrıntılar: [Çalışma takip kılavuzu](STUDY_TRACKER_GUIDE.md).
+| Belge | İçerik |
+|---|---|
+| [DOCKER.md](DOCKER.md) | Docker/Compose kurulumu, VPS'e taşıma, Tailscale ile güvenli erişim |
+| [REMOTE_TTS.md](REMOTE_TTS.md) | GPU'suz sunucudan kendi bilgisayarına/Colab'a seslendirme devri |
+| [COURSE_PROJECTS.md](COURSE_PROJECTS.md) | Çok kaynaklı ders projeleri |
+| [FLASHCARD_GUIDE.md](FLASHCARD_GUIDE.md) | Flashcard çalışma masası |
+| [EXAM_GUIDE.md](EXAM_GUIDE.md) | Sınav hazırlama ve çözme |
+| [STUDY_TRACKER_GUIDE.md](STUDY_TRACKER_GUIDE.md) | Görev/süre takibi |
