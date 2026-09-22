@@ -48,3 +48,8 @@ Bu, Anki tarzı öğrenme adımları ve SM-2 temelli yerel zamanlayıcıdır; An
 - tests/test_flashcards.py ve tests/test_web_api.py: var olan özelliklerin regresyonu ve Anki metin dışa aktarımı.
 
 Referans davranışlar: [Anki deste seçenekleri](https://docs.ankiweb.net/deck-options), [Anki metin aktarımı](https://docs.ankiweb.net/importing/text-files.html).
+
+
+## Bir dersteki birden fazla kaynaktan deste oluşturma
+
+Yeni ders projelerinde kaynakları işaretleyip **Kart desteleri** sekmesini aç. Bir PDF için ayrı deste veya birkaç haftanın PDF'lerinden ortak deste oluşturabilirsin. Ücretsiz kaynak kartları ve yapay zeka ile soru üretimi bu seçime uyar; önce anlatı veya video üretmek gerekmez. Kart ve çalışma geçmişi yine deste bazında tutulur. Ayrıntılar: [COURSE_PROJECTS.md](COURSE_PROJECTS.md).

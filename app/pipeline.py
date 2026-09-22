@@ -2,6 +2,7 @@ import hashlib
 import json
 import re
 import shutil
+import subprocess
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,9 @@ from app.config import PROJECTS_DIR, VideoOptions
 from app.models import RawSection, Slide, SynthResult, WordTiming
 from app.parsers import parse_source
 from app.tts import get_provider
+from app.tts.coqui_parallel import synthesize_parallel
+from app.tts.chatterbox_parallel import synthesize_parallel as synthesize_chatterbox_parallel
+from app.tts.remote import REMOTE_ENGINES, synthesize_remote
 from app.video.slide_renderer import render_slide
 from app.tts.pronunciation import effective_map as pronunciation_effective_map, normalize_pronunciation
 from app.video.subtitle import estimate_word_timings, realign_word_timings, write_ass
@@ -202,11 +206,21 @@ def _save_cached_words(path: Path, words: list[WordTiming] | None) -> None:
 
 
 def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice: str,
-                  rate: str, opts: VideoOptions, progress_cb=None) -> tuple[Path, Path]:
+                  rate: str, opts: VideoOptions, progress_cb=None, status_cb=None,
+                  force_audio: bool = False) -> tuple[Path, Path]:
     assets = pdir / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     quarantined = quarantine_orphan_assets(pdir, len(slides))
-    provider = get_provider(tts_provider_name)
+    # Coqui + birden fazla paralel worker seçiliyse (bkz.
+    # VideoOptions.coqui_parallel_workers), her worker kendi model kopyasını
+    # AYRI bir process'te yükleyecek — bu durumda burada TEK BİR provider'ı
+    # ekstra yüklemek (kullanılmayacak ~2GB/30sn'lik bir israf) gereksiz.
+    remote_tts = opts.tts_backend == "remote"
+    if remote_tts and tts_provider_name not in REMOTE_ENGINES:
+        raise ValueError(f"'{tts_provider_name}' motoru uzak GPU'da çalıştırılamaz (yalnızca {', '.join(REMOTE_ENGINES)}).")
+    coqui_parallel = tts_provider_name == "coqui" and opts.coqui_parallel_workers > 1 and not remote_tts
+    chatterbox_parallel = tts_provider_name == "chatterbox"
+    provider = None if coqui_parallel or chatterbox_parallel or remote_tts else get_provider(tts_provider_name)
     pronunciation_map = pronunciation_effective_map()
 
     breadcrumbs = []
@@ -216,35 +230,38 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
             chap = s.title
         breadcrumbs.append(chap if s.level != "chapter" else "")
 
-    segment_paths = []
-    audio_paths = []
     total = len(slides)
 
+    # 1. geçiş: her slaytın önbellek durumunu belirle; henüz sesi olmayanları
+    # topla ("pending") — bkz. 2. geçiş.
+    plan: list[dict] = []
+    pending: list[tuple[int, str, str, Path]] = []
     for i, slide in enumerate(slides, start=1):
-        if progress_cb:
-            progress_cb(i, total, slide.title)
-
         narration = slide.narration.strip() or slide.title
         narration_for_tts = normalize_pronunciation(narration, mapping=pronunciation_map)
 
         h = _slide_hash(slide, tts_provider_name, voice, rate, opts)
         narration_hash = _narration_hash(narration_for_tts, tts_provider_name, voice, rate)
-        hash_file = assets / f"slide_{i:03d}.hash"
-        narration_hash_file = assets / f"slide_{i:03d}.narration_hash"
-        words_cache_file = assets / f"slide_{i:03d}.words.json"
-        seg_path = assets / f"segment_{i:03d}.mp4"
-        audio_path = assets / f"slide_{i:03d}.mp3"
-        img_path = assets / f"slide_{i:03d}.png"
-        srt_path = assets / f"slide_{i:03d}.ass"
+        entry = {
+            "slide": slide, "index": i, "narration": narration,
+            "hash": h, "narration_hash": narration_hash,
+            "hash_file": assets / f"slide_{i:03d}.hash",
+            "narration_hash_file": assets / f"slide_{i:03d}.narration_hash",
+            "words_cache_file": assets / f"slide_{i:03d}.words.json",
+            "seg_path": assets / f"segment_{i:03d}.mp4",
+            "audio_path": assets / f"slide_{i:03d}.mp3",
+            "img_path": assets / f"slide_{i:03d}.png",
+            "srt_path": assets / f"slide_{i:03d}.ass",
+            "fully_cached": False, "audio_reused": False, "synth": None,
+        }
 
         if (
-            hash_file.exists()
-            and hash_file.read_text().strip() == h
-            and seg_path.exists()
-            and audio_path.exists()
+            not force_audio
+            and entry["hash_file"].exists() and entry["hash_file"].read_text().strip() == h
+            and entry["seg_path"].exists() and entry["audio_path"].exists()
         ):
-            segment_paths.append(seg_path)
-            audio_paths.append(audio_path)
+            entry["fully_cached"] = True
+            plan.append(entry)
             continue
 
         # Yalnızca tema/altyazı/geçiş gibi görsel ayarlar değiştiyse (anlatım/ses/
@@ -252,18 +269,115 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
         # ücretli bir sağlayıcıda (Agent CLI, ElevenLabs, Coqui) bu ciddi zaman/
         # maliyet kazandırır.
         audio_reusable = (
-            narration_hash_file.exists()
-            and narration_hash_file.read_text().strip() == narration_hash
-            and audio_path.exists()
+            not force_audio
+            and entry["narration_hash_file"].exists()
+            and entry["narration_hash_file"].read_text().strip() == narration_hash
+            and entry["audio_path"].exists()
         )
+        cached_duration = None
         if audio_reusable:
-            duration = ffprobe_duration(audio_path)
-            synth = SynthResult(duration=duration, words=_load_cached_words(words_cache_file))
+            try:
+                cached_duration = ffprobe_duration(entry["audio_path"])
+            except (OSError, ValueError, subprocess.SubprocessError):
+                # Yarıda kesilmiş/native çökmüş bir TTS yazımı bozuk MP3
+                # bırakmış olabilir; onu geçerli cache sanma.
+                audio_reusable = False
+
+        if audio_reusable:
+            entry["audio_reused"] = True
+            entry["synth"] = SynthResult(
+                duration=cached_duration,
+                words=_load_cached_words(entry["words_cache_file"]),
+            )
         else:
-            synth = provider.synthesize(narration_for_tts, voice, audio_path, rate)
-            duration = ffprobe_duration(audio_path)
-            narration_hash_file.write_text(narration_hash, encoding="utf-8")
-            _save_cached_words(words_cache_file, synth.words)
+            # Hash'i sentezden önce yazmak güvenlidir: yeniden kullanım ayrıca
+            # geçerli bir MP3 ister. Böylece paralel partinin ortasında süreç
+            # kapanırsa tamamlanan sesler bir sonraki çalıştırmada korunur.
+            entry["audio_path"].unlink(missing_ok=True)
+            entry["words_cache_file"].unlink(missing_ok=True)
+            entry["narration_hash_file"].write_text(narration_hash, encoding="utf-8")
+            pending.append((len(plan), narration_for_tts, voice, entry["audio_path"]))
+        plan.append(entry)
+
+    # 2. geçiş: bekleyen sesleri üret. Coqui + birden fazla paralel worker
+    # seçiliyse (bkz. VideoOptions.coqui_parallel_workers), bağımsız
+    # process'lerde aynı anda üretilir — diğer sağlayıcılar ve tekli Coqui
+    # kullanımı etkilenmez, eskisi gibi tek tek üretir.
+    if pending:
+        items = [(text, v, out_path) for _idx, text, v, out_path in pending]
+        total_pending = len(items)
+
+        def on_tts_progress(done: int, done_total: int) -> None:
+            # Bu geçişin kendi (0..total_pending) sayacı var, 3. geçişin
+            # (0..total) sayacından FARKLI — kasıtlı: kullanıcı arayüzü bu
+            # geçişte "Seslendiriliyor" mesajını görüp ilerlemenin gerçekten
+            # ilerlediğini anlar; 3. geçiş başlayınca sayaç kendi ölçeğine
+            # döner. Hiç ilerleme göstermemekten (eski davranış — büyük
+            # projelerde "0/0 Başlatılıyor" olarak saatlerce donmuş görünüyordu)
+            # çok daha iyi.
+            if progress_cb:
+                progress_cb(done, done_total, "Seslendiriliyor")
+
+        def on_tts_status(message: str) -> None:
+            if status_cb:
+                status_cb(message)
+
+        if remote_tts:
+            results = synthesize_remote(
+                items,
+                tts_provider_name,
+                rate,
+                opts.remote_tts_concurrency,
+                progress_cb=on_tts_progress,
+                status_cb=on_tts_status,
+            )
+        elif coqui_parallel:
+            results = synthesize_parallel(
+                items,
+                opts.coqui_parallel_workers,
+                progress_cb=on_tts_progress,
+                status_cb=on_tts_status,
+            )
+        elif chatterbox_parallel:
+            results = synthesize_chatterbox_parallel(
+                items,
+                opts.chatterbox_parallel_workers,
+                progress_cb=on_tts_progress,
+                status_cb=on_tts_status,
+            )
+        else:
+            results = []
+            for i, (text, v, out_path) in enumerate(items, start=1):
+                results.append(provider.synthesize(text, v, out_path, rate))
+                on_tts_progress(i, total_pending)
+        for (plan_index, *_rest), synth in zip(pending, results):
+            plan[plan_index]["synth"] = synth
+
+    # 3. geçiş: her slayt için görsel/segment üretimi.
+    segment_paths = []
+    audio_paths = []
+    for entry in plan:
+        i = entry["index"]
+        if progress_cb:
+            progress_cb(i, total, entry["slide"].title)
+
+        if entry["fully_cached"]:
+            segment_paths.append(entry["seg_path"])
+            audio_paths.append(entry["audio_path"])
+            continue
+
+        slide = entry["slide"]
+        narration = entry["narration"]
+        synth = entry["synth"]
+        audio_path = entry["audio_path"]
+        img_path = entry["img_path"]
+        srt_path = entry["srt_path"]
+        seg_path = entry["seg_path"]
+
+        duration = ffprobe_duration(audio_path)
+        if not entry["audio_reused"]:
+            entry["narration_hash_file"].write_text(entry["narration_hash"], encoding="utf-8")
+            _save_cached_words(entry["words_cache_file"], synth.words)
 
         # Kod bloğu bulunan slaytlarda altyazı kutusu ekranın alt kısmındaki kod
         # kutusuyla çakışabileceğinden, o slaytlarda altyazı gösterilmez.
@@ -283,7 +397,7 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
 
         build_segment(img_path, audio_path, duration, seg_path, opts, ass_path)
 
-        hash_file.write_text(h, encoding="utf-8")
+        entry["hash_file"].write_text(entry["hash"], encoding="utf-8")
         segment_paths.append(seg_path)
         audio_paths.append(audio_path)
 

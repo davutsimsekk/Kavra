@@ -15,9 +15,10 @@ import json
 import re
 from pathlib import Path
 
-from app.config import ROOT
+from app.config import DATA_DIR
 
-OVERRIDES_PATH = ROOT / "pronunciation_overrides.json"
+# Kullanıcı verisi: kod klasöründe değil DATA_DIR'de tutulur (Docker'da kalıcı volume).
+OVERRIDES_PATH = DATA_DIR / "pronunciation_overrides.json"
 
 # Kod içinde sabit kodlanmış, gemiyle gelen varsayılan sözlük. Kullanıcı arayüzden
 # (Ayarlar > Telaffuz Sözlüğü) yeni terim ekleyebilir veya bu varsayılanlardan

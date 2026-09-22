@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -9,11 +10,32 @@ from pygments.lexers import CppLexer
 from app.models import Slide
 from app.video.themes import ThemePreset, resolve_theme
 
-FONT_DIR = Path(r"C:\Windows\Fonts")
-FONT_TITLE = FONT_DIR / "segoeuib.ttf"
-FONT_BODY = FONT_DIR / "segoeui.ttf"
-FONT_SMALL = FONT_DIR / "segoeuisl.ttf"
-FONT_CODE = FONT_DIR / "consola.ttf"
+_CUSTOM_FONT_DIR = Path(os.environ["KAVRA_FONT_DIR"]).expanduser() if os.environ.get("KAVRA_FONT_DIR") else None
+
+
+def _font_file(*relative_candidates: str) -> Path:
+    roots = [
+        *([_CUSTOM_FONT_DIR] if _CUSTOM_FONT_DIR else []),
+        Path(r"C:\Windows\Fonts"),
+        Path("/usr/share/fonts/truetype/dejavu"),
+        Path("/usr/share/fonts/truetype/liberation2"),
+    ]
+    for root in roots:
+        for candidate in relative_candidates:
+            path = root / candidate
+            if path.is_file():
+                return path
+    searched = ", ".join(str(root / name) for root in roots for name in relative_candidates)
+    raise RuntimeError(
+        "Kavra slayt fontları bulunamadı. KAVRA_FONT_DIR ayarla veya DejaVu Sans kur. "
+        f"Aranan yollar: {searched}"
+    )
+
+
+FONT_TITLE = _font_file("segoeuib.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf")
+FONT_BODY = _font_file("segoeui.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf")
+FONT_SMALL = _font_file("segoeuisl.ttf", "DejaVuSans.ttf", "LiberationSans-Regular.ttf")
+FONT_CODE = _font_file("consola.ttf", "DejaVuSansMono.ttf", "LiberationMono-Regular.ttf")
 
 
 def _font(path: Path, size: int) -> ImageFont.FreeTypeFont:
@@ -351,7 +373,9 @@ def render_slide(slide: Slide, index: int, total: int, breadcrumb: str,
                  out_path: Path, width: int = 1920, height: int = 1080,
                  accent: tuple[int, int, int] | None = None,
                  theme_preset: str = "auto"):
-    if slide.background_image and Path(slide.background_image).exists():
+    if slide.background_image:
+        if not Path(slide.background_image).is_file():
+            raise FileNotFoundError("PDF sayfa görseli bulunamadı: " + slide.background_image)
         _render_source_page(slide.background_image, out_path, width, height)
         return
 

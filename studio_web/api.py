@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -19,12 +20,15 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.concurrency import run_in_threadpool
 
+from app import course_projects
 from app.asset_integrity import audit_assets
 from app.config import (
     CACHE_DIR,
     PROJECTS_DIR,
     ROOT,
+    STUDY_DATA_DIR,
     VideoOptions,
     get_api_key,
     load_settings,
@@ -80,8 +84,16 @@ from app.tts.pronunciation import (
     save_overrides,
 )
 from app.tts import PROVIDER_LABELS, list_voices as list_tts_voices
+from app.tts.coqui_parallel import MAX_PARALLEL_WORKERS as MAX_COQUI_PARALLEL_WORKERS
+from app.tts.chatterbox_parallel import MAX_PARALLEL_WORKERS as MAX_CHATTERBOX_PARALLEL_WORKERS
+from app.tts.remote import REMOTE_ENGINES as REMOTE_TTS_ENGINES, RemoteTTSConfig, RemoteTTSError
+from app.tts.remote import check_connection as remote_tts_check_connection
+from studio_web.remote_tts_routes import remote_tts_state
+
+MAX_REMOTE_TTS_CONCURRENCY = 4
 from app.video.slide_renderer import render_slide
 from app.video.themes import THEME_LABELS
+from studio_web import access
 from studio_web.batch_queue import BatchQueueStore
 from studio_web.job_store import PersistentJobStore
 
@@ -92,14 +104,9 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 jobs = PersistentJobStore(CACHE_DIR / "web_job_status")
 queue = BatchQueueStore(CACHE_DIR / "batch_queue")
-app = FastAPI(title="Ders Stüdyosu Local API", version="2.0")
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
-ALLOWED_BROWSER_ORIGINS = {
-    "http://127.0.0.1:8765",
-    "http://localhost:8765",
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
-}
+app = FastAPI(title="Kavra Local API", version="2.0")
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=access.allowed_hosts())
+ALLOWED_BROWSER_ORIGINS = access.allowed_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(ALLOWED_BROWSER_ORIGINS),
@@ -112,7 +119,7 @@ app.add_middleware(
 async def protect_local_mutations(request: Request, call_next):
     origin = request.headers.get("origin")
     if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin not in ALLOWED_BROWSER_ORIGINS:
-        return JSONResponse({"detail": "Bu yerel API yalnızca Ders Stüdyosu arayüzünden kullanılabilir."}, status_code=403)
+        return JSONResponse({"detail": "Bu yerel API yalnızca Kavra arayüzünden kullanılabilir."}, status_code=403)
     return await call_next(request)
 
 
@@ -124,6 +131,37 @@ def _project_dir(project_id: str) -> Path:
     if candidate.parent != root or not candidate.is_dir():
         raise HTTPException(404, "Proje bulunamadı.")
     return candidate
+
+
+def _workspace_dir(project_id: str, video_id: str | None = None) -> Path:
+    pdir = _project_dir(project_id)
+    if video_id is None:
+        if course_projects.is_course(pdir):
+            raise HTTPException(409, "Bu ders için önce bir video çalışma alanı seçmelisin.")
+        return pdir
+    try:
+        vdir = course_projects.child_dir(pdir, "videos", video_id)
+        if not (vdir / "video.json").is_file():
+            raise FileNotFoundError
+        return vdir
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Video bulunamadı.") from exc
+
+
+def _workspace_url(project_id: str, video_id: str | None = None) -> str:
+    base = f"/api/projects/{project_id}"
+    return base + f"/videos/{video_id}" if video_id else base
+
+
+def _course_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Kaynak veya video bulunamadı.") from exc
 
 
 def _slides_or_empty(pdir: Path) -> list[Slide]:
@@ -164,6 +202,8 @@ def _single_request_is_safe(section_count: int, character_count: int) -> bool:
 
 
 def _project_payload(pdir: Path) -> dict[str, Any]:
+    if course_projects.is_course(pdir):
+        return course_projects.course_payload(pdir)
     sections = load_raw_sections(pdir) if (pdir / "raw_sections.json").exists() else []
     slides = _slides_or_empty(pdir)
     source_path = ""
@@ -202,7 +242,16 @@ def bootstrap():
     settings = load_settings()
     projects = []
     for pdir in sorted(PROJECTS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if not pdir.is_dir() or not (pdir / "raw_sections.json").exists():
+        if not pdir.is_dir():
+            continue
+        if course_projects.is_course(pdir):
+            course = course_projects.course_payload(pdir)
+            projects.append({"id": pdir.name, "name": course["name"], "kind": "course",
+                             "sourceCount": len(course["sources"]), "videoCount": len(course["videos"]),
+                             "sections": sum(source["sectionCount"] for source in course["sources"]),
+                             "slides": sum(video["slideCount"] for video in course["videos"])})
+            continue
+        if not (pdir / "raw_sections.json").exists():
             continue
         try:
             raw_count = len(json.loads((pdir / "raw_sections.json").read_text(encoding="utf-8")))
@@ -217,6 +266,9 @@ def bootstrap():
             "openai": bool(get_api_key("OPENAI_API_KEY")),
             "elevenlabs": bool(get_api_key("ELEVENLABS_API_KEY")),
         },
+        "remoteTts": remote_tts_state(),
+        # Klasör açma yalnızca Windows masaüstünde çalışır (sunucu/Docker'da düğme gizlenir).
+        "canOpenFolder": os.name == "nt",
         "themes": [{"id": key, "label": value} for key, value in THEME_LABELS.items()],
         "ttsProviders": [{"id": key, "label": value} for key, value in PROVIDER_LABELS.items()],
         "models": {
@@ -341,9 +393,10 @@ def remove_from_queue(item_id: str):
     return {"ok": True}
 
 
+@app.put("/api/projects/{project_id}/videos/{video_id}/slides")
 @app.put("/api/projects/{project_id}/slides")
-def replace_slides(project_id: str, payload: dict = Body(...)):
-    pdir = _project_dir(project_id)
+def replace_slides(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     raw_slides = payload.get("slides")
     if not isinstance(raw_slides, list):
         raise HTTPException(400, "slides bir dizi olmalı.")
@@ -356,15 +409,16 @@ def replace_slides(project_id: str, payload: dict = Body(...)):
     }
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/slides/{index}/regenerate")
 @app.post("/api/projects/{project_id}/slides/{index}/regenerate")
-def regenerate_slide(project_id: str, index: int, payload: dict = Body(...)):
+def regenerate_slide(project_id: str, index: int, payload: dict = Body(...), video_id: str | None = None):
     """Regenerate only the slide(s) that came from the same source section(s).
 
     Unlike /generate, this is a single direct LLM call scoped to one small
     source group — no chunking, no session/checkpoint bookkeeping. A snapshot
     of script.json is taken first so a bad regeneration is always recoverable.
     """
-    pdir = _project_dir(project_id)
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     if not (0 <= index < len(slides)):
         raise HTTPException(404, "Slayt bulunamadı.")
@@ -422,7 +476,13 @@ def regenerate_slide(project_id: str, index: int, payload: dict = Body(...)):
         else:
             raise ValueError("Bilinmeyen LLM sağlayıcısı.")
 
-        fresh_slides = generator.generate(source_sections, style)
+        if any(section.page_image for section in source_sections):
+            fresh_slides = generator.generate_chunked(
+                source_sections, style, single_slide_per_section=True,
+                request_interval_sec=0,
+            )
+        else:
+            fresh_slides = generator.generate(source_sections, style)
         snapshot_script(pdir, reason="before-regenerate")
         updated = apply_regeneration(current_slides, index, fresh_slides)
         save_script(pdir, updated)
@@ -443,15 +503,17 @@ def regenerate_slide(project_id: str, index: int, payload: dict = Body(...)):
     return {"jobId": jobs.create("regenerate", work)}
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/snapshots")
 @app.get("/api/projects/{project_id}/snapshots")
-def get_snapshots(project_id: str):
-    pdir = _project_dir(project_id)
+def get_snapshots(project_id: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     return {"snapshots": list_snapshots(pdir)}
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/snapshots/{filename}/restore")
 @app.post("/api/projects/{project_id}/snapshots/{filename}/restore")
-def restore_project_snapshot(project_id: str, filename: str):
-    pdir = _project_dir(project_id)
+def restore_project_snapshot(project_id: str, filename: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     try:
         slides = restore_snapshot(pdir, filename)
     except ValueError as exc:
@@ -464,25 +526,28 @@ def restore_project_snapshot(project_id: str, filename: str):
     }
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/quality")
 @app.post("/api/projects/{project_id}/quality")
-def refresh_project_quality(project_id: str):
-    pdir = _project_dir(project_id)
+def refresh_project_quality(project_id: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     return {"quality": load_or_analyze_quality(pdir, slides)}
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/generation/reset")
 @app.post("/api/projects/{project_id}/generation/reset")
-def reset_generation_progress(project_id: str):
-    pdir = _project_dir(project_id)
+def reset_generation_progress(project_id: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     sections = load_raw_sections(pdir)
     slides = _slides_or_empty(pdir)
     reset_checkpoint(pdir)
     return {"generation": generation_status(pdir, sections, slides)}
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/generate")
 @app.post("/api/projects/{project_id}/generate")
-def generate_script(project_id: str, payload: dict = Body(...)):
-    pdir = _project_dir(project_id)
+def generate_script(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     sections = load_raw_sections(pdir)
     # "Sayfaları birebir slayt olarak kullan" modunda parse_and_cache her bölüme
     # bir sayfa görüntüsü yazmıştır — proje genelinde tek bir bayrak yerine bunu
@@ -511,10 +576,8 @@ def generate_script(project_id: str, payload: dict = Body(...)):
     selected_sections = [section for _index, section in selected_items]
     provider_name = str(payload.get("provider", "agent"))
     style = str(payload.get("style", "")).strip()
-    # Sayfa modunda her sayfa kendi başına tek bir slayt olmak ZORUNDA (görüntüsü
-    # zaten o sayfa) — tek istekte tüm sayfaları birden göndermek bu varsayımı
-    # kırar, o yüzden bu modda singleRequest isteği ne olursa olsun yok sayılır.
-    single_request = bool(payload.get("singleRequest", False)) and not page_mode
+    # Page identities preserve the 1:1 slide mapping even in multi-page calls.
+    single_request = bool(payload.get("singleRequest", False))
     target_duration_minutes: float | None = None
     if bool(payload.get("durationLimitEnabled", False)):
         try:
@@ -537,8 +600,7 @@ def generate_script(project_id: str, payload: dict = Body(...)):
             "Tek istek seçimi bu kaynak için çok büyük. 12 bölüm veya 24.000 karakteri "
             "aşan seçimlerde chunk modunu kullan; Claude parçaları aynı oturumda sürdürecek.",
         )
-    # Sayfa modunda LLM çağrısı başına tam olarak 1 bölüm (1 sayfa) gider.
-    max_sections = 1 if page_mode else max(1, min(int(payload.get("maxSections", 4)), 20))
+    max_sections = max(1, min(int(payload.get("maxSections", 4)), 20))
     insert_after = payload.get("insertAfter")
     insertion_cursor = len(existing) if insert_after is None else max(0, min(int(insert_after) + 1, len(existing)))
 
@@ -701,12 +763,17 @@ def generate_script(project_id: str, payload: dict = Body(...)):
             record_cost(pdir, provider=provider_name, kind="generate", words=generated_words)
         return result
 
+    course_projects.save_video_settings(pdir, "narrationSettings", payload,
+        ("provider", "agentCommand", "geminiModel", "openaiModel", "openaiEndpoint", "timeout",
+         "reuseSession", "maxSections", "singleRequest", "resumeCompleted", "style",
+         "durationLimitEnabled", "targetDurationMinutes"))
     return {"jobId": jobs.create("script", work)}
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/preview")
 @app.post("/api/projects/{project_id}/preview")
-def preview_slide(project_id: str, payload: dict = Body(...)):
-    pdir = _project_dir(project_id)
+def preview_slide(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     raw_slide = payload.get("slide")
     if raw_slide:
@@ -730,12 +797,13 @@ def preview_slide(project_id: str, payload: dict = Body(...)):
         preview_path,
         theme_preset=str(payload.get("theme", "auto")),
     )
-    return {"url": f"/api/projects/{project_id}/preview.png?v={time.time_ns()}"}
+    return {"url": f"{_workspace_url(project_id, video_id)}/preview.png?v={time.time_ns()}"}
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/preview.png")
 @app.get("/api/projects/{project_id}/preview.png")
-def preview_image(project_id: str):
-    path = _project_dir(project_id) / "assets" / "web_preview.png"
+def preview_image(project_id: str, video_id: str | None = None):
+    path = _workspace_dir(project_id, video_id) / "assets" / "web_preview.png"
     if not path.exists():
         raise HTTPException(404, "Önizleme henüz oluşturulmadı.")
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
@@ -799,6 +867,41 @@ def list_voices(provider_name: str):
         raise HTTPException(400, str(exc)) from exc
 
 
+def _signal_process_group(process: subprocess.Popen, sig: int) -> None:
+    try:
+        os.killpg(process.pid, sig)  # start_new_session=True ile pgid == pid
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        process.send_signal(sig)
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Stop a render worker and all of its model subprocesses."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    else:
+        # POSIX'te alt süreçleri (FFmpeg, TTS worker'ları) da kapatmak için worker kendi süreç
+        # grubunda başlatılır (start_new_session) ve tüm grup sonlandırılır.
+        _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            process.kill()
+        else:
+            _signal_process_group(process, signal.SIGKILL)
+            process.wait()
+
+
 def _render_in_isolated_process(
     job_id: str,
     pdir: Path,
@@ -807,6 +910,8 @@ def _render_in_isolated_process(
     voice: str,
     rate: str,
     options: VideoOptions,
+    force_audio: bool = False,
+    api_base: str | None = None,
 ) -> dict[str, Any]:
     """Keep native TTS/torch failures outside the long-running API process."""
     job_dir = CACHE_DIR / "web_jobs"
@@ -821,6 +926,8 @@ def _render_in_isolated_process(
                 "voice": voice,
                 "rate": rate,
                 "options": asdict(options),
+                "forceAudioRegeneration": force_audio,
+                "apiBase": api_base,
             },
             ensure_ascii=False,
         ),
@@ -836,6 +943,22 @@ def _render_in_isolated_process(
         encoding="utf-8",
         errors="replace",
         creationflags=creation_flags,
+        start_new_session=(os.name != "nt"),
+    )
+    jobs.set_cancel_callback(job_id, lambda: _terminate_process_tree(process))
+    jobs.update(
+        job_id,
+        current=0,
+        total=len(slides),
+        progress=0,
+        message=f"Render worker başlatıldı · 0/{len(slides)}",
+        # API çöker/beklenmedik kapanırsa (Ctrl+C, taskkill, mavi ekran) bu process'i sonlandıracak
+        # hiçbir canlı callback kalmaz. workerPid + workerMarker sayesinde PersistentJobStore, bir
+        # sonraki açılışta iş "kesildi" diye işaretlerken aynı zamanda gerçek OS process'ini de arayıp
+        # (komut satırı marker'la eşleşiyorsa) kapatabiliyor — aksi halde render_worker günlerce
+        # arka planda öksüz çalışmaya devam ediyordu (Docker doğrulaması sırasında yakalandı).
+        workerPid=process.pid,
+        workerMarker="studio_web.render_worker",
     )
     final_result = None
     diagnostic_lines: list[str] = []
@@ -843,20 +966,36 @@ def _render_in_isolated_process(
         assert process.stdout is not None
         for line in process.stdout:
             line = line.rstrip()
-            if not line.startswith("__DERS_JOB__"):
+            marker = "__DERS_JOB__"
+            marker_index = line.find(marker)
+            if marker_index < 0:
                 if line:
                     diagnostic_lines.append(line[-500:])
                     diagnostic_lines = diagnostic_lines[-8:]
                 continue
-            event = json.loads(line.removeprefix("__DERS_JOB__"))
+            diagnostic_prefix = line[:marker_index].strip()
+            if diagnostic_prefix:
+                diagnostic_lines.append(diagnostic_prefix[-500:])
+                diagnostic_lines = diagnostic_lines[-8:]
+            event = json.loads(line[marker_index + len(marker):])
             if event.get("type") == "progress":
                 index, total = int(event["current"]), int(event["total"])
+                title = str(event.get("title", ""))
+                completed = index if title == "Seslendiriliyor" else index - 1
                 jobs.update(
                     job_id,
                     current=index,
                     total=total,
-                    progress=round((index - 1) * 100 / max(total, 1)),
-                    message=f"{index}/{total} · {event.get('title', '')}",
+                    progress=round(completed * 100 / max(total, 1)),
+                    message=f"{index}/{total} · {title}",
+                )
+            elif event.get("type") == "status":
+                # Status metni model yükleme/slayt başlangıcı gibi faz içi bir
+                # olaydır; son progress event'inin sayacını tekrar 102'ye
+                # çevirmemeli (TTS pending sayısı cache nedeniyle daha az olabilir).
+                jobs.update(
+                    job_id,
+                    message=str(event.get("message", "Render hazırlanıyor")),
                 )
             elif event.get("type") == "complete":
                 final_result = event["result"]
@@ -865,11 +1004,11 @@ def _render_in_isolated_process(
         return_code = process.wait()
         if return_code != 0:
             detail = "\n".join(diagnostic_lines[-4:])
-            if provider_name == "coqui":
+            if provider_name in ("coqui", "anka", "chatterbox"):
                 raise RuntimeError(
-                    "Coqui/PyTorch izole render sürecinde native olarak kapandı; web arayüzü "
-                    "çalışmaya devam ediyor. GPU/RAM baskısı veya torch uyumsuzluğu olabilir. "
-                    "Şimdilik Edge-TTS ya da Piper seçebilirsin."
+                    f"{provider_name.capitalize()}/PyTorch izole render sürecinde native olarak "
+                    "kapandı; web arayüzü çalışmaya devam ediyor. GPU/RAM baskısı veya torch "
+                    "uyumsuzluğu olabilir. Şimdilik Edge-TTS ya da Piper seçebilirsin."
                     + (f"\n{detail}" if detail else "")
                 )
             raise RuntimeError(f"Render süreci exit {return_code} ile kapandı.\n{detail}")
@@ -877,23 +1016,26 @@ def _render_in_isolated_process(
             raise RuntimeError("Render süreci sonuç üretmeden kapandı.")
         return final_result
     finally:
+        jobs.clear_cancel_callback(job_id)
         if process.poll() is None:
-            process.kill()
+            _terminate_process_tree(process)
         spec_path.unlink(missing_ok=True)
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/render-estimate")
 @app.get("/api/projects/{project_id}/render-estimate")
-def render_estimate(project_id: str, provider: str = "edge"):
-    pdir = _project_dir(project_id)
+def render_estimate(project_id: str, provider: str = "edge", video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
     return estimate_render(pdir, slides, provider)
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/render")
 @app.post("/api/projects/{project_id}/render")
-def start_render(project_id: str, payload: dict = Body(...)):
-    pdir = _project_dir(project_id)
+def start_render(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
@@ -905,16 +1047,57 @@ def start_render(project_id: str, payload: dict = Body(...)):
         )
         raise HTTPException(409, f"Kalite kapısı renderı durdurdu: {first_issue}")
     provider_name = str(payload.get("ttsProvider", "edge"))
+    force_audio = bool(payload.get("forceAudioRegeneration", False))
     voice = str(payload.get("voice", "tr-TR-AhmetNeural"))
     rate = str(payload.get("rate", "+0%"))
     eleven_key = str(payload.get("elevenlabsKey", "")).strip()
     if eleven_key:
         save_api_key("ELEVENLABS_API_KEY", eleven_key)
+    try:
+        coqui_parallel_workers = int(payload.get("coquiParallelWorkers", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Paralel worker sayısı bir tam sayı olmalı.")
+    if not (1 <= coqui_parallel_workers <= MAX_COQUI_PARALLEL_WORKERS):
+        raise HTTPException(
+            400,
+            f"Paralel worker sayısı 1 ile {MAX_COQUI_PARALLEL_WORKERS} arasında olmalı "
+            "(daha yükseği bu makinede sistem çökmesine yol açabilir).",
+        )
+    try:
+        chatterbox_parallel_workers = int(payload.get("chatterboxParallelWorkers", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Chatterbox paralel worker sayısı bir tam sayı olmalı.")
+    if not (1 <= chatterbox_parallel_workers <= MAX_CHATTERBOX_PARALLEL_WORKERS):
+        raise HTTPException(
+            400,
+            f"Chatterbox paralel worker sayısı 1 ile {MAX_CHATTERBOX_PARALLEL_WORKERS} arasında olmalı "
+            "(8 GB VRAM için iki model güvenli üst sınırdır).",
+        )
+    tts_backend = str(payload.get("ttsBackend", "local"))
+    if tts_backend not in ("local", "remote"):
+        raise HTTPException(400, "Çalıştırma yeri 'local' veya 'remote' olmalı.")
+    try:
+        remote_tts_concurrency = int(payload.get("remoteTtsConcurrency", 2))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Uzak GPU eşzamanlılığı bir tam sayı olmalı.")
+    if not (1 <= remote_tts_concurrency <= MAX_REMOTE_TTS_CONCURRENCY):
+        raise HTTPException(400, f"Uzak GPU eşzamanlılığı 1 ile {MAX_REMOTE_TTS_CONCURRENCY} arasında olmalı.")
+    if tts_backend == "remote":
+        if provider_name not in REMOTE_TTS_ENGINES:
+            raise HTTPException(400, f"'{provider_name}' motoru uzak GPU'da çalıştırılamaz (yalnızca {', '.join(REMOTE_TTS_ENGINES)}).")
+        try:  # Render başlamadan bağlantı sorunu anında görünsün, iş sonradan patlamasın.
+            remote_tts_check_connection(RemoteTTSConfig.load())
+        except RemoteTTSError as exc:
+            raise HTTPException(400, str(exc)) from exc
     options = VideoOptions(
         subtitles=bool(payload.get("subtitles", True)),
         fade_transitions=bool(payload.get("fadeTransitions", True)),
         ken_burns=bool(payload.get("kenBurns", False)),
         theme_preset=str(payload.get("theme", "auto")),
+        coqui_parallel_workers=coqui_parallel_workers,
+        chatterbox_parallel_workers=chatterbox_parallel_workers,
+        tts_backend=tts_backend,
+        remote_tts_concurrency=remote_tts_concurrency,
     )
     settings = load_settings()
     settings.update({
@@ -925,15 +1108,39 @@ def start_render(project_id: str, payload: dict = Body(...)):
         "fade_transitions": options.fade_transitions,
         "ken_burns": options.ken_burns,
         "theme_preset": options.theme_preset,
+        "coqui_parallel_workers": options.coqui_parallel_workers,
+        "chatterbox_parallel_workers": options.chatterbox_parallel_workers,
+        "tts_backend": options.tts_backend,
+        "remote_tts_concurrency": options.remote_tts_concurrency,
     })
     save_settings(settings)
 
     def work(job_id: str):
         return _render_in_isolated_process(
-            job_id, pdir, slides, provider_name, voice, rate, options
+            job_id, pdir, slides, provider_name, voice, rate, options,
+            force_audio=force_audio,
+            api_base=_workspace_url(project_id, video_id),
         )
 
-    return {"jobId": jobs.create("video", work)}
+    course_projects.save_video_settings(pdir, "videoSettings", payload,
+        ("theme", "ttsProvider", "voice", "rate", "subtitles", "fadeTransitions", "kenBurns", "coquiParallelWorkers", "chatterboxParallelWorkers", "ttsBackend", "remoteTtsConcurrency"))
+    job_id = jobs.create(
+        "video",
+        work,
+        context={
+            "projectId": project_id,
+            "videoId": video_id,
+            "apiBase": _workspace_url(project_id, video_id),
+            "view": "video",
+            "stage": "video",
+        },
+    )
+    return {"jobId": job_id}
+
+
+@app.get("/api/jobs/active")
+def get_active_jobs(kind: str | None = None):
+    return {"jobs": jobs.list_active(kind)}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -944,9 +1151,21 @@ def get_job(job_id: str):
         raise HTTPException(404, "İş bulunamadı.") from exc
 
 
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    try:
+        job = jobs.get(job_id)
+        if job.get("kind") != "video":
+            raise HTTPException(409, "Şu anda yalnızca video render işleri iptal edilebilir.")
+        return jobs.cancel(job_id)
+    except KeyError as exc:
+        raise HTTPException(404, "İş bulunamadı.") from exc
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/output/{kind}")
 @app.get("/api/projects/{project_id}/output/{kind}")
-def get_output(project_id: str, kind: str):
-    pdir = _project_dir(project_id)
+def get_output(project_id: str, kind: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     if kind == "video":
         path, media_type = pdir / "ders.mp4", "video/mp4"
     elif kind == "audio":
@@ -958,17 +1177,25 @@ def get_output(project_id: str, kind: str):
     return FileResponse(path, media_type=media_type, filename=path.name)
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/export/{kind}")
 @app.get("/api/projects/{project_id}/export/{kind}")
-def export_study_material(project_id: str, kind: str):
-    """Deterministic study-material export (no LLM call): notes/transcript/anki/quiz."""
+def export_study_material(
+    project_id: str,
+    kind: str,
+    video_id: str | None = None,
+    theme: str = "auto",
+):
+    """Deterministic study-material export; PDF also renders the current slides."""
     if kind not in EXPORT_BUILDERS:
         raise HTTPException(404, "Bilinmeyen dışa aktarım türü.")
-    pdir = _project_dir(project_id)
+    if kind == "pdf" and theme not in THEME_LABELS:
+        raise HTTPException(400, "Bilinmeyen slayt teması.")
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
     filename, media_type, _builder = EXPORT_BUILDERS[kind]
-    path = write_export(pdir, kind, slides)
+    path = write_export(pdir, kind, slides, theme_preset=theme)
     return FileResponse(path, media_type=media_type, filename=filename)
 
 
@@ -1051,7 +1278,11 @@ def list_flashcard_decks(project_id: str):
 @app.post("/api/projects/{project_id}/flashcards/decks")
 def create_flashcard_deck(project_id: str, payload: dict = Body(...)):
     pdir = _project_dir(project_id)
-    slides = _slides_or_empty(pdir)
+    source_context = None
+    if course_projects.is_course(pdir):
+        slides, source_context = _course_call(course_projects.source_slides, pdir, payload.get("sourceIds"))
+    else:
+        slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
     name = str(payload.get("name", "")).strip()
@@ -1059,7 +1290,7 @@ def create_flashcard_deck(project_id: str, payload: dict = Body(...)):
 
     if kind == "static":
         try:
-            deck = create_deck(pdir, name, kind, slides)
+            deck = create_deck(pdir, name, kind, slides, source_context=source_context)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return _deck_payload(deck)
@@ -1076,6 +1307,12 @@ def create_flashcard_deck(project_id: str, payload: dict = Body(...)):
         raise HTTPException(400, "Kart sayısı sayısal olmalı.")
     if count is not None and not (1 <= count <= 60):
         raise HTTPException(400, "Kart sayısı 1 ile 60 arasında olmalı.")
+
+    if source_context:
+        from app.flashcards import source_batches
+        batches = _course_call(source_batches, slides)
+        if count is not None and count < len(batches):
+            raise HTTPException(400, f"Bu kaynak seçimi {len(batches)} parça içeriyor; en az {len(batches)} kart seç veya kaynak seçimini daralt.")
 
     api_key = str(payload.get("apiKey", "")).strip()
     if api_key and provider_name == "gemini":
@@ -1116,7 +1353,7 @@ def create_flashcard_deck(project_id: str, payload: dict = Body(...)):
         try:
             deck = create_deck(
                 pdir, name, "llm", slides,
-                generator=generator, count=count, focus_prompt=focus_prompt,
+                generator=generator, count=count, focus_prompt=focus_prompt, source_context=source_context,
             )
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -1173,7 +1410,13 @@ def regenerate_flashcard_deck(project_id: str, deck_id: str):
     taze eklenir. Diğer desteler etkilenmez.
     """
     pdir = _project_dir(project_id)
-    slides = _slides_or_empty(pdir)
+    existing_deck = get_deck(pdir, deck_id)
+    if course_projects.is_course(pdir):
+        if not existing_deck:
+            raise HTTPException(404, "Deste bulunamadı.")
+        slides, _context = _course_call(course_projects.source_slides, pdir, existing_deck.get("sourceIds"))
+    else:
+        slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
     try:
@@ -1304,14 +1547,15 @@ def toggle_flashcard_suspend(project_id: str, deck_id: str, card_id: str, payloa
     return {"card": card, "summary": deck_summary(get_deck(pdir, deck_id)["cards"])}
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/chapters")
 @app.get("/api/projects/{project_id}/chapters")
-def list_chapters(project_id: str):
+def list_chapters(project_id: str, video_id: str | None = None):
     """Read-only chapter breakdown of the current script, and whether it's exportable.
 
     Splitting only becomes possible once every slide has a rendered segment —
     this reuses those files rather than re-rendering anything.
     """
-    pdir = _project_dir(project_id)
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     if not slides:
         return {"chapters": [], "allRendered": False, "missingCount": 0, "youtubeChaptersReady": False}
@@ -1341,9 +1585,10 @@ def list_chapters(project_id: str):
     }
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/chapters/export")
 @app.post("/api/projects/{project_id}/chapters/export")
-def export_chapters(project_id: str):
-    pdir = _project_dir(project_id)
+def export_chapters(project_id: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
     if not slides:
         raise HTTPException(400, "Önce bir transkript oluşturmalısın.")
@@ -1357,9 +1602,10 @@ def export_chapters(project_id: str):
     return {"jobId": jobs.create("chapters", work)}
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/chapters/download/{filename}")
 @app.get("/api/projects/{project_id}/chapters/download/{filename}")
-def download_chapter_file(project_id: str, filename: str):
-    pdir = _project_dir(project_id)
+def download_chapter_file(project_id: str, filename: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     chapters_dir = (pdir / "chapters").resolve()
     candidate = (chapters_dir / filename).resolve()
     if candidate.parent != chapters_dir or not candidate.is_file():
@@ -1372,13 +1618,118 @@ def download_chapter_file(project_id: str, filename: str):
     return FileResponse(candidate, media_type=media_type, filename=candidate.name)
 
 
+@app.post("/api/projects/{project_id}/videos/{video_id}/open-output")
 @app.post("/api/projects/{project_id}/open-output")
-def open_output(project_id: str):
-    pdir = _project_dir(project_id)
+def open_output(project_id: str, video_id: str | None = None):
+    pdir = _workspace_dir(project_id, video_id)
     if os.name != "nt":
         raise HTTPException(400, "Klasör açma yalnızca Windows masaüstünde destekleniyor.")
     os.startfile(pdir)
     return {"ok": True}
+
+
+@app.post("/api/projects")
+def create_course_project(payload: dict = Body(...)):
+    pdir = _course_call(course_projects.create_course, PROJECTS_DIR, str(payload.get("name", "")))
+    return course_projects.course_payload(pdir)
+
+
+@app.post("/api/projects/{project_id}/sources/path")
+def add_course_source_path(project_id: str, payload: dict = Body(...)):
+    source_path = Path(str(payload.get("path", ""))).expanduser()
+    if not source_path.is_file():
+        raise HTTPException(400, "Kaynak dosya bulunamadı.")
+    pdir = _project_dir(project_id)
+    source = _course_call(course_projects.import_source, pdir, source_path, source_path.name,
+        page_mode=bool(payload.get("pageMode")), vision_enrich=bool(payload.get("visionEnrich")),
+        vision_api_key=_resolve_vision_api_key(bool(payload.get("visionEnrich")), str(payload.get("visionApiKey", ""))),
+        extract_diagrams=bool(payload.get("extractDiagrams")))
+    return {"source": source, "project": course_projects.course_payload(pdir)}
+
+
+@app.post("/api/projects/{project_id}/sources/upload")
+async def add_course_source_upload(project_id: str, file: UploadFile = File(...),
+                                   page_mode: bool = Form(False), vision_enrich: bool = Form(False),
+                                   vision_api_key: str = Form(""), extract_diagrams: bool = Form(False)):
+    pdir = _project_dir(project_id)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in {".pdf", ".pptx", ".md"}:
+        raise HTTPException(400, "Yalnızca PDF, PowerPoint ve Markdown destekleniyor.")
+    target = UPLOAD_DIR / (uuid.uuid4().hex + suffix)
+    try:
+        size = 0
+        with target.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 100 * 1024 * 1024:
+                    raise HTTPException(413, "Dosya 100 MB sınırını aşıyor.")
+                output.write(chunk)
+        source = await run_in_threadpool(_course_call, course_projects.import_source, pdir, target, Path(file.filename or "Kaynak").name,
+            page_mode=page_mode, vision_enrich=vision_enrich,
+            vision_api_key=_resolve_vision_api_key(vision_enrich, vision_api_key), extract_diagrams=extract_diagrams)
+        return {"source": source, "project": course_projects.course_payload(pdir)}
+    finally:
+        target.unlink(missing_ok=True)
+        await file.close()
+
+
+@app.get("/api/projects/{project_id}/sources/{source_id}")
+def get_course_source(project_id: str, source_id: str):
+    sdir = _course_call(course_projects.child_dir, _project_dir(project_id), "sources", source_id)
+    return {**course_projects.read_json(sdir / "source.json"),
+            "sections": [asdict(section) for section in load_raw_sections(sdir)]}
+
+
+@app.get("/api/projects/{project_id}/sources/{source_id}/file")
+def get_course_source_file(project_id: str, source_id: str):
+    sdir = _course_call(course_projects.child_dir, _project_dir(project_id), "sources", source_id)
+    meta = course_projects.read_json(sdir / "source.json")
+    path = (sdir / meta["filename"]).resolve()
+    if path.parent != sdir.resolve() or not path.is_file():
+        raise HTTPException(404, "Kaynak dosya bulunamadı.")
+    return FileResponse(path, filename=meta["name"])
+
+
+@app.post("/api/projects/{project_id}/videos")
+def create_course_video(project_id: str, payload: dict = Body(...)):
+    vdir = _course_call(course_projects.create_video, _project_dir(project_id), str(payload.get("name", "")), payload.get("sourceIds"), payload.get("presentationMode"))
+    return get_course_video(project_id, vdir.name)
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}")
+def get_course_video(project_id: str, video_id: str):
+    vdir = _workspace_dir(project_id, video_id)
+    meta = course_projects.read_json(vdir / "video.json")
+    return {**_project_payload(vdir), **meta, "id": project_id, "videoId": video_id,
+            "apiBase": _workspace_url(project_id, video_id),
+            "sourceRefs": course_projects.read_json(vdir / "source_refs.json")}
+
+
+@app.post("/api/projects/{project_id}/flashcards/source-estimate")
+def estimate_course_deck(project_id: str, payload: dict = Body(...)):
+    from app.flashcards import source_batches
+    slides, _context = _course_call(course_projects.source_slides, _project_dir(project_id), payload.get("sourceIds"))
+    batches = _course_call(source_batches, slides)
+    return {"requests": len(batches), "characters": sum(len(s.title) + len(s.narration) for s in slides),
+            "staticCards": len(slides)}
+
+
+from studio_web.exam_routes import register_exam_routes
+register_exam_routes(app, _project_dir, lambda: jobs)
+
+
+from app.study_tracker import StudyStore
+from studio_web.study_routes import register_study_routes
+study_store = StudyStore(STUDY_DATA_DIR / "study.sqlite3")
+
+def _study_courses():
+    return [{"id":p.name,"name":course_projects.read_json(p/"course.json")["name"]}
+            for p in PROJECTS_DIR.iterdir() if p.is_dir() and course_projects.is_course(p)]
+
+register_study_routes(app, lambda: study_store, _study_courses)
+
+from studio_web.remote_tts_routes import register_remote_tts_routes
+register_remote_tts_routes(app)
 
 
 if WEB_DIST.exists():

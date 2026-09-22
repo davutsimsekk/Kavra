@@ -1,6 +1,9 @@
-# Ders Stüdyosu
+# Kavra
 
 MD / PPTX / PDF dosyasını, gerçek bir hocanın tahtada anlattığı gibi **sesli ve görüntülü ders videosuna** çeviren, tamamen yerel (D: sürücüsünde) çalışan bir araç.
+
+Başka bir bilgisayara kurulum için hazır Docker/Compose paketi ve Docker dışı
+kurulum komutları: [DOCKER.md](DOCKER.md).
 
 ## Neden bu şekilde tasarlandı
 
@@ -18,7 +21,7 @@ MD / PPTX / PDF dosyasını, gerçek bir hocanın tahtada anlattığı gibi **se
 
 ## Nasıl çalıştırılır
 
-Önerilen modern **masaüstü uygulaması** için çift tıkla: **`run_gui.bat`**. React arayüzü, adres çubuğu ve tarayıcı sekmeleri olmayan ayrı bir Microsoft Edge/Google Chrome uygulama penceresinde açılır. Yerel servis yalnızca `127.0.0.1:8765` üzerinde çalışır; masaüstü ve web aynı API'yi ve aynı özellikleri kullanır.
+Önerilen modern **masaüstü uygulaması** için çift tıkla: **`run_gui.bat`**. React arayüzü, adres çubuğu ve tarayıcı sekmeleri olmayan ayrı bir Microsoft Edge/Google Chrome uygulama penceresinde açılır. Yerel servis yalnızca `127.0.0.1:8768` üzerinde çalışır; masaüstü ve web aynı API'yi ve aynı özellikleri kullanır.
 
 Normal tarayıcı sekmesinde açmak için **`run_web.bat`**, eski Tkinter arayüzüne dönmek için **`run_legacy_gui.bat`** kullanılabilir.
 
@@ -45,6 +48,12 @@ venv/Scripts/python.exe gui/app_gui.py
 
 Her slayt için üretilen ses/görüntü/segment `projects/<proje>/assets/` altında saklanır ve **içerik değişmediği sürece tekrar üretilmez** (hash tabanlı önbellek) — yani bir slaytın metnini düzeltip videoyu tekrar oluşturduğunda sadece o slayt yeniden render edilir.
 
+### Çok kaynaklı ders projeleri
+
+Web arayüzünde artık bir proje bir dersi temsil eder. Aynı derse birden fazla PDF/PPTX/Markdown dosyası yüklenebilir; seçilen bir kaynaktan ayrı video veya sıralanmış birkaç kaynaktan birleşik video hazırlanabilir. Her video kendi anlatı ve çıktı dosyalarını tutar. Flashcard desteleri doğrudan seçilen bir veya birden fazla kaynaktan üretilebilir.
+
+Başlamak için **Ders projesi oluştur** düğmesini kullan. Eski projeler korunur. Kullanım, depolama ve maliyet sınırları: [COURSE_PROJECTS.md](COURSE_PROJECTS.md).
+
 ### Modern React arayüzü
 
 - Üç aşamalı düzen: **Kaynak → Anlatı → Stüdyo**
@@ -70,10 +79,11 @@ Frontend geliştirme modu için `run_web_dev.bat`; production build yenilemek i�
 | **piper** | Orta | Tamamen offline | `models/piper/dfki` sesi hazır kurulu. Kelime zamanlaması yok → altyazı süresi tahmini olarak hesaplanır |
 | **elevenlabs** | En doğal | Bulut, API key gerekir | Ücretsiz kota çok sınırlı (~10 dk/ay). `elevenlabs.io`'dan key al |
 | **coqui** (XTTS v2) | Yüksek + ses klonlama | Tamamen offline (ilk indirme hariç) | GPU varsa (bu makinede RTX 4060) **otomatik kullanılır** ve CPU'ya göre **~3.8x daha hızlı** (11s vs 41s, ölçüldü) — ayrıca CPU'da yaşanan "bellek yetersiz" çökmesi GPU'da hiç olmuyor. **CPML lisansı: kişisel/akademik kullanım serbest, ticari kullanım ayrı lisans ister** (coqui.ai/cpml) |
+| **anka** (Anka TTS) | Yüksek + ses klonlama, **Türkçe'ye özel eğitildi** | Tamamen offline (ilk indirme hariç) | Aynı 8 gerçek ders metniyle, aynı makinede XTTS v2'ye karşı ölçüldü: **~2.35x daha hızlı** (2.80x vs 1.19x realtime), **~1/3 VRAM** (~1GB vs ~2.8GB), ve XTTS'in bilinen Türkçe 226-karakter kesilme uyarısını hiç vermiyor. Referans ses klonlamak için XTTS'ten farklı olarak sesin BİREBİR yazılı transkriptini de ister (bkz. `app/tts/anka_provider.py`). **CC-BY-NC-4.0 lisansı: yalnızca kişisel/araştırma kullanımı, ticari kullanım ayrı lisans ister** (huggingface.co/krmkayabasi/Anka-TTS) |
 
-**GPU notu:** `CoquiTTSProvider`, `torch.cuda.is_available()` ile otomatik GPU algılar; elle `CoquiTTSProvider(gpu=False)` diyerek CPU'ya zorlayabilirsin. `install_coqui.py` de artık `nvidia-smi` ile GPU'yu otomatik tespit edip uygun (CUDA veya CPU) torch sürümünü kuruyor.
+**GPU notu:** `CoquiTTSProvider`/`AnkaTTSProvider`, GPU'yu otomatik algılar; elle `gpu=False`/`device="cpu"` vererek CPU'ya zorlayabilirsin. `install_coqui.py`/`install_anka.py` de `nvidia-smi` ile GPU'yu otomatik tespit edip uygun torch sürümünü kuruyor. **Önemli:** `anka-tts` paketi kurulumu sırasında `transformers`'ı coqui-tts'in çalışmadığı bir sürüme (5.x) yükseltiyor — `install_anka.py` bunu otomatik olarak coqui-uyumlu sürümlere geri sabitliyor, ikisi aynı venv'de bir arada çalışabiliyor (elle `pip install anka-tts[tts]` çalıştırırsan bu adımı unutma).
 
-**Türkçe TTS manzarası (2026-09 araştırması):** 2026'nın trend açık kaynak modelleri (Kokoro-82M, Chatterbox, Zonos, CosyVoice) esas olarak İngilizce odaklı, Türkçe desteği zayıf/yok. Türkçe için gerçekçi en iyi offline seçenekler hâlâ **XTTS v2** (en kaliteli + ses klonlama, ağır) ve **Piper** (hafif, hızlı, orta kalite) — ikisi de zaten kurulu. **Meta'nın MMS-TTS-tur** modeli (VITS mimarili, tek konuşmacı) daha hafif bir orta-yol alternatifi olabilir ama henüz entegre edilmedi; istersen ekleyebiliriz.
+**Türkçe TTS manzarası (2026-09 araştırması, güncellendi):** 2026'nın trend açık kaynak modelleri (Kokoro-82M, Chatterbox, Zonos, CosyVoice) esas olarak İngilizce odaklı, Türkçe desteği zayıf/yok. **Anka TTS**, Türkçe'ye özel fine-tune edilmiş bir F5-TTS türevi olarak bu boşluğu dolduruyor ve kendi/bizim ölçümlerimizde XTTS v2'den hem hızlı hem daha isabetli (WER %1.73 vs %3.34) çıktı — kişisel kullanım için önerilen sağlayıcı bu artık. **Chatterbox Multilingual** (500M, MIT lisans, Türkçe dahil 23+ dil) araştırıldı ama Türkçe'ye özel eğitilmemiş olması ve XTTS ile aynı boy sınıfında olması nedeniyle eklenmedi. **Piper** hâlâ en hafif/hızlı (offline, CPU'da bile 17x realtime) ama kalite orta.
 
 İstediğin an sağlayıcı değiştirip aynı script ile farklı bir ses deneyebilirsin.
 
@@ -97,8 +107,9 @@ Türkçe TTS motorları İngilizce kelimeleri (if, else, switch, pointer, struct
 
 - **137 bölümlük dev bir rehberi tek seferde işlemek** hem LLM kotasını hem render süresini zorlar — bölüm bölüm (ör. önce "Bölüm 1: C Programlama Dili") ilerlemen önerilir.
 - PDF metin çıkarma, kaynağın fontuna bağlıdır; taranmış (image) PDF'lerde OCR yoktur, metin çıkmaz.
-- Piper/ElevenLabs/Coqui'de altyazı zamanlaması tahminidir (Edge-TTS kadar hassas değildir).
+- Piper/ElevenLabs/Coqui/Anka'da altyazı zamanlaması tahminidir (Edge-TTS kadar hassas değildir).
 - Coqui CPU'da yavaştır; büyük bir dersi Coqui ile üretmek saatler sürebilir.
+- Anka'da klonlanmış bir ses eklemek için XTTS'ten farklı olarak referans .wav'ın yanına birebir transkriptini içeren aynı isimli bir .txt de koymak gerekir (bkz. `app/tts/anka_provider.py`), yoksa açık bir hata verir.
 
 ## Klasör yapısı
 
@@ -113,6 +124,7 @@ ders_video/
   venv/                 Python sanal ortamı (D:)
   _cache/               pip/hf/torch/temp önbellekleri (D:, C:'ye asla yazmaz)
   install_coqui.py      opsiyonel Coqui XTTS v2 kurulumu
+  install_anka.py       opsiyonel Anka TTS kurulumu (Türkçe'ye özel, XTTS'ten hızlı)
   run_gui.bat           modern masaüstü uygulamasını çift tıkla başlat
   run_legacy_gui.bat    eski Tkinter arayüzünü başlat
 ```
@@ -120,3 +132,11 @@ ders_video/
 ## Gelişmiş flashcard çalışma masası
 
 Flashcard bölümüne günlük limitler, dakika bazlı öğrenme, kalıcı geri al, çoklu boşluk/ters kart, etiketli kart tarayıcısı, istatistikler ve TSV içe aktarma eklendi. Kullanım, kısayollar ve Anki ile farklar için [FLASHCARD_GUIDE.md](FLASHCARD_GUIDE.md) dosyasına bak.
+
+## Sınav hazırlama
+
+Ders projesindeki **Sınav hazırla** alanında seçili kaynaklardan şıklı, klasik veya karma sınav üretilebilir. Çıkmış sınavlar isteğe bağlı üslup/yapı örneği olarak yüklenir. Çözme ekranı, açıklamalı cevap anahtarı ve ayrı soru/cevap dışa aktarımı bulunur. Ayrıntılar: [EXAM_GUIDE.md](EXAM_GUIDE.md). PDF anlatım kalitesi için plan: [YAPILACAKLAR.md](YAPILACAKLAR.md).
+
+## Çalışma takip alanı
+
+Ana ekrandaki **Çalışma takibi** veya ders içindeki **Çalışmanı takip et** kartı üzerinden bağımsız/derse bağlı projeler, klasörler, görevler, Pomodoro, süre kayıtları ve raporlar kullanılabilir. Yerel veriler `study_data/study.sqlite3` içinde tutulur; yapay zekâ çağrısı yapılmaz. Ayrıntılar: [Çalışma takip kılavuzu](STUDY_TRACKER_GUIDE.md).

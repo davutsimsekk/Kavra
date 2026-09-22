@@ -68,7 +68,8 @@ def _largest_embedded_diagram(doc: "pymupdf.Document", page) -> tuple[bytes, str
 
 def parse(path: Path, page_mode: bool = False, pdir: Path | None = None,
           vision_enrich: bool = False, vision_api_key: str | None = None,
-          vision_model: str | None = None, extract_diagrams: bool = False) -> list[RawSection]:
+          vision_model: str | None = None, extract_diagrams: bool = False,
+          keep_empty_pages: bool = False) -> list[RawSection]:
     """page_mode=True: her sayfayı olduğu gibi (yüksek çözünürlüklü PNG) rasterize
     edip RawSection.page_image'e yazar — "sayfaları birebir slayt olarak kullan"
     özelliği bu görüntüyü render_slide'da doğrudan slayt arka planı yapar. pdir
@@ -110,7 +111,7 @@ def parse(path: Path, page_mode: bool = False, pdir: Path | None = None,
             # olarak kalmalı; vision_enrich ya da extract_diagrams açıkken de
             # aynı şekilde — metni olmasa bile bir görseli/diyagramı olabilir.
             # Hiçbiri açık değilse eski davranış (metin yoksa atla) korunuyor.
-            if not text and not page_mode and not vision_enrich and not extract_diagrams:
+            if not text and not page_mode and not vision_enrich and not extract_diagrams and not keep_empty_pages:
                 continue
 
             title = _page_title(page) or f"Sayfa {i}"
@@ -146,7 +147,7 @@ def parse(path: Path, page_mode: bool = False, pdir: Path | None = None,
                     image_path.write_bytes(image_bytes)
                     embedded_image = str(image_path)
 
-            if not text and not page_mode and not embedded_image:
+            if not text and not page_mode and not embedded_image and not keep_empty_pages:
                 continue
 
             sections.append(RawSection(

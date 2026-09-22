@@ -5,6 +5,7 @@
 
 # --- Python ---
 venv/
+chatterbox_venv/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -21,14 +22,28 @@ projects/
 settings.json
 /ders.mp3
 /ders.mp4
+/gps.mp4
 
 # --- Web arayüzü ---
 webui/node_modules/
 webui/dist/
 
-# --- İç geliştirme notları (yayınlamak istersen bu satırı kaldır) ---
+# --- İç geliştirme notları (yayınlamak istersen bu satırları kaldır) ---
 HANDOFF.md
+AGENT_HANDOFF.md
+KAVRA_PROJECT_HANDOFF.md
 
 # --- OS çöpü ---
 Thumbs.db
 Desktop.ini
+
+# --- Playwright MCP test çıktıları (ekran görüntüsü/konsol günlüğü, kod değil) ---
+.playwright-mcp/
+# Yerel çalışma takip verileri
+study_data/
+
+# Docker'da kalıcı ayar ve gizli anahtar alanı
+docker-data/
+
+# Colab için üretilen paket (python tools/build_colab.py ile yeniden üretilir)
+colab/*.zip

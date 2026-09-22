@@ -27,6 +27,11 @@ def main(spec_path: str) -> int:
         def on_progress(index: int, total: int, title: str):
             emit({"type": "progress", "current": index, "total": total, "title": title})
 
+        def on_status(message: str):
+            emit({"type": "status", "message": message, "total": len(slides)})
+
+        on_status("Render planı hazırlanıyor")
+
         video, audio = render_video(
             pdir,
             slides,
@@ -35,13 +40,15 @@ def main(spec_path: str) -> int:
             spec["rate"],
             options,
             progress_cb=on_progress,
+            status_cb=on_status,
+            force_audio=bool(spec.get("forceAudioRegeneration", False)),
         )
-        project_id = pdir.name
+        api_base = spec.get("apiBase") or f"/api/projects/{pdir.name}"
         emit({
             "type": "complete",
             "result": {
-                "videoUrl": f"/api/projects/{project_id}/output/video",
-                "audioUrl": f"/api/projects/{project_id}/output/audio",
+                "videoUrl": f"{api_base}/output/video",
+                "audioUrl": f"{api_base}/output/audio",
                 "videoPath": str(video),
                 "audioPath": str(audio),
             },

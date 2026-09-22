@@ -22,6 +22,51 @@ _SINGLE_SLIDE_NOTE = (
 )
 
 
+def _page_batch_note(sections: list[RawSection]) -> str:
+    if len(sections) == 1:
+        return _SINGLE_SLIDE_NOTE
+    mapping = [
+        {"position": i + 1, "sourceSectionId": source_fingerprint(section),
+         "title": section.title, "breadcrumb": section.breadcrumb}
+        for i, section in enumerate(sections)
+    ]
+    return (
+        "SAYFA MODU AKTİF: Kaynak sayfalarını birlikte okuyup tutarlı bir anlatım kur. "
+        f"TAM OLARAK {len(sections)} slayt üret, her kaynak sayfasına bir slayt. "
+        "Bu kural, genel slayt bölme kuralından önceliklidir. Sayfaları birleştirme veya atlama; giriş/bölüm ayıracı gibi ek slayt üretme. "
+        "Her slayt yalnızca kendi sayfasını anlatsın; görüntüsü o PDF sayfası olacak. "
+        "Her JSON slayt nesnesine sourceSectionIds alanını ekle: bu alan yalnızca "
+        "o sayfanın aşağıdaki sourceSectionId değerini içeren tek elemanlı bir dizi olmalı. "
+        "Kimlikleri aynen kopyala; sayfa başlıkları aynı olsa bile kimlikleri farklıdır. "
+        "Yanıtı aşağıdaki kaynak sırasıyla ver. Sayfa eşlemesi:\n"
+        + json.dumps(mapping, ensure_ascii=False)
+    )
+
+
+def _align_page_slides(slides: list[Slide], sections: list[RawSection]) -> list[Slide]:
+    """Validate the entire response before persisting any part of a page batch."""
+    if len(sections) == 1:
+        result = [slides[0] if len(slides) == 1 else _merge_into_one_slide(slides, sections)]
+    else:
+        grouped = {source_fingerprint(section): [] for section in sections}
+        for slide in slides:
+            ids = slide.source_section_ids
+            if len(ids) != 1 or not isinstance(ids[0], str) or ids[0] not in grouped:
+                raise ValueError("PDF yanıtında sayfa kimliği eksik veya geçersiz. Bu parça kaydedilmedi; çağrı başına daha az sayfayla tekrar deneyebilirsin.")
+            grouped[ids[0]].append(slide)
+        if any(not group for group in grouped.values()):
+            raise ValueError("PDF yanıtında bazı sayfaların anlatımı eksik. Bu parça kaydedilmedi; çağrı başına daha az sayfayla tekrar deneyebilirsin.")
+        result = [
+            group[0] if len(group) == 1 else _merge_into_one_slide(group, [section])
+            for section in sections
+            for group in [grouped[source_fingerprint(section)]]
+        ]
+    for slide, section in zip(result, sections):
+        slide.background_image = section.page_image
+        tag_slides_with_source([slide], [section])
+    return result
+
+
 def _merge_into_one_slide(slides: list[Slide], section_chunk: list[RawSection]) -> Slide:
     """single_slide_per_section talimatına rağmen model yine de >1 slayt
     döndürürse, içerik kaybetmemek için hepsini TEK slaytta birleştir.
@@ -212,7 +257,9 @@ class NarrationGenerator(ABC):
             # onu ezmesin diye çok daha yüksek bir güvenlik tavanı kullanılır.
             # Sadece karakter tabanlı (eski) kullanım için 6000 varsayılanı korunur.
             max_chars = 6000 if max_sections_per_chunk is None else 40_000
-        chunks = [sections] if single_request else chunk_sections(
+        # Source sections stay whole; page mode controls output correspondence,
+        # independently of how many pages share an LLM request.
+        chunks = [sections] if single_request and sections else chunk_sections(
             sections, max_chars, max_sections=max_sections_per_chunk
         )
         # Toplam ağırlık TÜM seçili kaynak üzerinden (chunk'lardan önce) hesaplanır
@@ -232,11 +279,12 @@ class NarrationGenerator(ABC):
                 budget_note = _duration_budget_note(chunk, total_weight, target_duration_minutes)
                 effective_note = f"{effective_note}\n\n{budget_note}".strip()
             if single_slide_per_section:
-                effective_note = f"{effective_note}\n\n{_SINGLE_SLIDE_NOTE}".strip()
+                effective_note = f"{effective_note}\n\n{_page_batch_note(chunk)}".strip()
             chunk_slides = self.generate(chunk, effective_note)
-            if single_slide_per_section and len(chunk_slides) != 1:
-                chunk_slides = [_merge_into_one_slide(chunk_slides, chunk)]
-            tag_slides_with_source(chunk_slides, chunk)
+            if single_slide_per_section:
+                chunk_slides = _align_page_slides(chunk_slides, chunk)
+            else:
+                tag_slides_with_source(chunk_slides, chunk)
             all_slides.extend(chunk_slides)
             lesson_memory.extend(chunk_slides)
             if chunk_result_cb:

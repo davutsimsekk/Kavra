@@ -172,7 +172,16 @@ class OpenAICompatibleNarrationGenerator(NarrationGenerator):
                 "HTTP yalnızca localhost için kabul edilir."
             )
 
-    def _call(self, prompt: str) -> str:
+    def _call(self, prompt: str, *, json_schema: dict | None = SLIDE_ARRAY_SCHEMA) -> str:
+        """json_schema: OpenRouter'a zorlatılacak yapılandırılmış çıktı şeması.
+        Varsayılan SLIDE_ARRAY_SCHEMA yalnızca ders anlatısı (generate()) için
+        doğru — slayt DIŞINDA bir şey üretmesi istenen her çağrı (ör. sınav
+        soruları, flashcard'lar) kendi şemasını ya da None (şema zorlamadan,
+        istemin kendi JSON talimatına güvenerek) geçirmeli. Bunu unutmak
+        gerçek bir hataydı: exam_routes.py sınav sorusu isterken slayt şeması
+        zorlanınca model "prompt" alanı olmayan slayt-şekilli nesneler
+        döndürüyor, doğrulama "1. soruda prompt eksik" diye başarısız oluyordu.
+        """
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -185,10 +194,6 @@ class OpenAICompatibleNarrationGenerator(NarrationGenerator):
             # prevents a long, paid generation from ending in unparsable JSON.
             payload.update({
                 "max_tokens": 16_000,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": SLIDE_ARRAY_SCHEMA,
-                },
                 # OpenRouter otherwise prefers the cheapest route.  For long
                 # lecture generations that can select a provider several times
                 # slower than the alternatives and leave the UI looking stuck.
@@ -199,6 +204,11 @@ class OpenAICompatibleNarrationGenerator(NarrationGenerator):
                     "sort": "throughput",
                 },
             })
+            if json_schema is not None:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": json_schema,
+                }
 
         delay = BASE_DELAY
         last_error: Exception | None = None

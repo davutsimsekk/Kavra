@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pymupdf
+
 from app.export import (
     build_anki_tsv,
     build_markdown_notes,
@@ -91,10 +93,19 @@ class WriteExportTests(unittest.TestCase):
             self.assertEqual(path.parent.name, "exports")
             self.assertFalse(path.with_suffix(path.suffix + ".tmp").exists())
 
+    def test_writes_one_pdf_page_per_slide(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_export(Path(tmp), "pdf", sample_slides(), theme_preset="white")
+            self.assertEqual(path.name, "ders-slaytlari.pdf")
+            self.assertTrue(path.read_bytes().startswith(b"%PDF"))
+            with pymupdf.open(path) as document:
+                self.assertEqual(document.page_count, len(sample_slides()))
+                self.assertAlmostEqual(document[0].rect.width / document[0].rect.height, 16 / 9)
+
     def test_rejects_unknown_kind(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
-                write_export(Path(tmp), "pdf", sample_slides())
+                write_export(Path(tmp), "epub", sample_slides())
 
 
 def _write_fake_audio(path: Path, seconds: float):

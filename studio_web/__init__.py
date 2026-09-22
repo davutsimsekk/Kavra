@@ -1,1 +1,1 @@
-"""Modern local web interface for Ders Stüdyosu."""
+"""Modern local web interface for Kavra."""

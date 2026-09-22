@@ -6,7 +6,7 @@ from app.tts import pronunciation
 
 class OverridesLifecycleTests(unittest.TestCase):
     def test_no_file_means_no_overrides(self):
-        with patch.object(pronunciation, "OVERRIDES_PATH", pronunciation.ROOT / "does-not-exist.json"):
+        with patch.object(pronunciation, "OVERRIDES_PATH", pronunciation.DATA_DIR / "does-not-exist.json"):
             self.assertEqual(pronunciation.load_overrides(), {})
 
     def test_save_then_load_round_trips_and_lowercases_terms(self):

@@ -59,5 +59,34 @@ class RenderIsolationTests(unittest.TestCase):
         self.assertFalse((CACHE_DIR / "web_jobs" / "native-crash-test.json").exists())
 
 
+    @patch("studio_web.api.jobs.update")
+    @patch("studio_web.api.subprocess.Popen")
+    def test_progress_marker_is_parsed_after_third_party_log_prefix(self, popen, update):
+        process = MagicMock()
+        process.stdout = iter([
+            'XTTS warning __DERS_JOB__{"type":"status","message":"XTTS 2× hazır","total":1}\n',
+            '__DERS_JOB__{"type":"complete","result":{"ok":true}}\n',
+        ])
+        process.wait.return_value = 0
+        process.poll.return_value = 0
+        popen.return_value = process
+
+        result = _render_in_isolated_process(
+            "embedded-marker-test",
+            CACHE_DIR,
+            [Slide(title="Test", narration="Test")],
+            "coqui",
+            "builtin:default",
+            "+0%",
+            VideoOptions(),
+        )
+
+        self.assertEqual(result, {"ok": True})
+        update.assert_any_call(
+            "embedded-marker-test",
+            message="XTTS 2× hazır",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

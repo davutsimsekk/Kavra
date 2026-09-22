@@ -17,7 +17,7 @@ from app.config import WORDS_PER_MINUTE as _WORDS_PER_MINUTE
 from app.models import Slide
 _FALLBACK_MB_PER_SLIDE = 2.5  # hiç segment yokken kaba ilk tahmin (1080p, kısa slayt)
 
-LOCAL_PROVIDERS = {"edge", "piper", "coqui"}
+LOCAL_PROVIDERS = {"edge", "piper", "coqui", "anka", "chatterbox"}
 
 
 def _existing_segment_sizes_mb(pdir: Path) -> list[float]:

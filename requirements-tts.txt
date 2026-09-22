@@ -1,0 +1,26 @@
+# Kavra ağır yerel TTS ortamı: Coqui XTTS v2 + Anka TTS + CUDA Torch.
+# Önce requirements.txt, sonra bu dosya kurulmalıdır.
+# CUDA 12.8 tekerlekleri NVIDIA sürücüsünü içermez; ana makinede güncel
+# NVIDIA sürücüsü bulunmalıdır.
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.11.0+cu128
+torchaudio==2.11.0+cu128
+torchcodec==0.16.0
+coqui-tts==0.27.5
+anka-tts[tts]==0.1.6
+f5-tts==1.1.22
+
+# F5-TTS'nin geniş bağımlılık aralıklarını temiz kurulumda deterministik tutar
+# ve pip'in onlarca eski datasets sürümünü denemesini önler.
+datasets==5.0.1
+fsspec[http]==2026.6.0
+gradio==6.17.3
+rich==13.9.4
+
+# Coqui ile birlikte doğrulanan seri. Anka'nın f5-tts bağımlılığı daha yeni
+# sürüme yükseltmeye çalışırsa bu sabitlemeler ana ortamı uyumlu tutar.
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface-hub==0.36.2

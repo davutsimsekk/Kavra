@@ -1,0 +1,107 @@
+{
+  "referenceText": "Kapıyı usulca araladığımda içerisi bomboş görünüyordu. Perdeler açık pencereden gelen rüzgârla yavaşça dalgalanıyordu.",
+  "samples": [
+    {
+      "number": 1,
+      "title": "Kısa",
+      "text": "Merhaba! Bu ses, aynı referans konuşmacının klonlanmasıyla üretildi. Amacım hangi motorun daha doğal duyulduğunu karşılaştırman.",
+      "results": [
+        {
+          "provider": "coqui",
+          "status": "complete",
+          "duration": 11.45,
+          "generationSeconds": 54.96,
+          "label": "Coqui XTTS v2",
+          "audioFile": "coqui.wav",
+          "audioUrl": "sample-1/coqui.wav"
+        },
+        {
+          "provider": "anka",
+          "status": "complete",
+          "duration": 8.53,
+          "generationSeconds": 35.19,
+          "label": "Anka TTS",
+          "audioFile": "anka.wav",
+          "audioUrl": "sample-1/anka.wav"
+        },
+        {
+          "provider": "chatterbox",
+          "status": "complete",
+          "duration": 7.48,
+          "generationSeconds": 76.13,
+          "label": "Chatterbox Multilingual",
+          "audioFile": "chatterbox.wav",
+          "audioUrl": "sample-1/chatterbox.wav"
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "title": "Orta",
+      "text": "Şimdi Java, Python, C ve C++'ı yan yana koyup genel bir tablo çıkaralım. Derleme şekli, bellek yönetimi ve çalışma zamanı davranışı açısından bu diller birbirinden oldukça farklı yaklaşımlar benimser.",
+      "results": [
+        {
+          "provider": "coqui",
+          "status": "complete",
+          "duration": 15.36,
+          "generationSeconds": 62.46,
+          "label": "Coqui XTTS v2",
+          "audioFile": "coqui.wav",
+          "audioUrl": "sample-2/coqui.wav"
+        },
+        {
+          "provider": "anka",
+          "status": "complete",
+          "duration": 14.05,
+          "generationSeconds": 29.22,
+          "label": "Anka TTS",
+          "audioFile": "anka.wav",
+          "audioUrl": "sample-2/anka.wav"
+        },
+        {
+          "provider": "chatterbox",
+          "status": "complete",
+          "duration": 12.76,
+          "generationSeconds": 115.85,
+          "label": "Chatterbox Multilingual",
+          "audioFile": "chatterbox.wav",
+          "audioUrl": "sample-2/chatterbox.wav"
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "title": "Uzun",
+      "text": "İşte tam bu noktadan başlayıp, sıfırdan C öğreneceğiz. Gömülü sistemler dünyasına geldiğimizde tablo tamamen değişiyor. Java önce bayt koduna derlenir, sonra sanal makine üzerinde çalışır; Python ise çoğunlukla yorumlanarak çalıştırılır. C ise doğrudan makine koduna derlenir ve donanıma çok daha yakın bir katmanda çalışır, bu da onu gömülü sistemler için vazgeçilmez kılar.",
+      "results": [
+        {
+          "provider": "coqui",
+          "status": "complete",
+          "duration": 26.3,
+          "generationSeconds": 75.28,
+          "label": "Coqui XTTS v2",
+          "audioFile": "coqui.wav",
+          "audioUrl": "sample-3/coqui.wav"
+        },
+        {
+          "provider": "anka",
+          "status": "complete",
+          "duration": 25.6,
+          "generationSeconds": 31.35,
+          "label": "Anka TTS",
+          "audioFile": "anka.wav",
+          "audioUrl": "sample-3/anka.wav"
+        },
+        {
+          "provider": "chatterbox",
+          "status": "complete",
+          "duration": 20.92,
+          "generationSeconds": 165.55,
+          "label": "Chatterbox Multilingual",
+          "audioFile": "chatterbox.wav",
+          "audioUrl": "sample-3/chatterbox.wav"
+        }
+      ]
+    }
+  ]
+}

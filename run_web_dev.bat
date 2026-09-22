@@ -15,6 +15,6 @@ set HF_XET_CACHE=%ROOT%_cache\hf_xet
 set TTS_HOME=%ROOT%_cache\tts_home
 if not exist "%TEMP%" mkdir "%TEMP%"
 if not exist "%NPM_CONFIG_CACHE%" mkdir "%NPM_CONFIG_CACHE%"
-start "Ders Studyosu API" /min /D "%ROOT%" "%ROOT%venv\Scripts\python.exe" -m uvicorn studio_web.api:app --host 127.0.0.1 --port 8765
+start "Kavra API" /min /D "%ROOT%" "%ROOT%venv\Scripts\python.exe" -m uvicorn studio_web.api:app --host 127.0.0.1 --port 8768
 cd /d "%ROOT%webui"
 npm run dev

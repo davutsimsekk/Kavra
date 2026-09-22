@@ -8,10 +8,14 @@ başlıkları, maddeleri ve anlatımdan temel çıktı oluşturmalıdır."
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
+
+import pymupdf
 
 from app.config import WORDS_PER_MINUTE
 from app.models import Slide, WordTiming
+from app.video.slide_renderer import render_slide
 from app.video.subtitle import WORDS_PER_CAPTION, estimate_word_timings
 from app.video.video_builder import ffprobe_duration
 
@@ -208,9 +212,52 @@ def build_vtt(pdir: Path, slides: list[Slide]) -> str:
     lines = ["WEBVTT", ""]
     for start, end, caption in _full_video_captions(pdir, slides):
         lines.append(f"{_fmt_vtt_time(start)} --> {_fmt_vtt_time(end)}")
-        lines.append(caption)
+        # WebVTT'de `&` ve `<` işaretleme sayılır; metin olarak görünmeleri için kaçışlanır.
+        lines.append(caption.replace("&", "&amp;").replace("<", "&lt;"))
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def build_slides_pdf(pdir: Path, slides: list[Slide], theme_preset: str = "auto") -> bytes:
+    """Render the current deck as a portable, one-slide-per-page PDF.
+
+    This deliberately reuses the video slide renderer but never touches TTS or
+    video generation. Rendering fresh images also prevents a partially rendered
+    or stale ``assets/slide_NNN.png`` cache from leaking into the PDF.
+    """
+    breadcrumbs: list[str] = []
+    chapter = ""
+    for slide in slides:
+        if slide.level == "chapter":
+            chapter = slide.title
+        breadcrumbs.append(chapter if slide.level != "chapter" else "")
+
+    document = pymupdf.open()
+    exports_dir = pdir / EXPORTS_DIR_NAME
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".pdf-slides-", dir=exports_dir) as tmp:
+            temp_dir = Path(tmp)
+            total = len(slides)
+            for index, slide in enumerate(slides, start=1):
+                image_path = temp_dir / f"slide_{index:03d}.png"
+                render_slide(
+                    slide,
+                    index,
+                    total,
+                    breadcrumbs[index - 1],
+                    image_path,
+                    width=1920,
+                    height=1080,
+                    theme_preset=theme_preset,
+                )
+                # PDF points are intentionally 16:9; the embedded 1920x1080 PNG
+                # retains enough detail for zooming and printing.
+                page = document.new_page(width=960, height=540)
+                page.insert_image(page.rect, filename=str(image_path))
+        return document.tobytes(garbage=4, deflate=True)
+    finally:
+        document.close()
 
 
 EXPORT_BUILDERS = {
@@ -220,19 +267,34 @@ EXPORT_BUILDERS = {
     "quiz": ("kendini-test-et.md", "text/markdown", build_quiz_markdown),
     "srt": ("altyazi.srt", "application/x-subrip", build_srt),
     "vtt": ("altyazi.vtt", "text/vtt", build_vtt),
+    "pdf": ("ders-slaytlari.pdf", "application/pdf", build_slides_pdf),
 }
 
 
-def write_export(pdir: Path, kind: str, slides: list[Slide]) -> Path:
+def write_export(
+    pdir: Path,
+    kind: str,
+    slides: list[Slide],
+    *,
+    theme_preset: str = "auto",
+) -> Path:
     """Render one export kind to disk (atomic) and return its path."""
     if kind not in EXPORT_BUILDERS:
         raise ValueError(f"Bilinmeyen dışa aktarım türü: {kind}")
     filename, _media_type, builder = EXPORT_BUILDERS[kind]
-    content = builder(pdir, slides) if kind in _PDIR_AWARE_KINDS else builder(slides)
     exports_dir = pdir / EXPORTS_DIR_NAME
     exports_dir.mkdir(parents=True, exist_ok=True)
+    if kind == "pdf":
+        content = builder(pdir, slides, theme_preset)
+    elif kind in _PDIR_AWARE_KINDS:
+        content = builder(pdir, slides)
+    else:
+        content = builder(slides)
     path = exports_dir / filename
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(content, encoding="utf-8")
+    if isinstance(content, bytes):
+        temp.write_bytes(content)
+    else:
+        temp.write_text(content, encoding="utf-8")
     temp.replace(path)
     return path

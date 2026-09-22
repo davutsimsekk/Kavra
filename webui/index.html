@@ -5,14 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f6f7f9" />
     <meta name="description" content="Kaynak materyallerini düzenli, anlatımlı ders videolarına dönüştür." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230f7664'/%3E%3Cpath d='M7 9h5q4 0 4 3q0-3 4-3h5v15h-5q-4 0-4 2q0-2-4-2H7zM16 12v14' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <script>
       try {
         const preference = localStorage.getItem('ders-studio-appearance') || 'light';
         document.documentElement.dataset.theme = preference === 'dark' || (preference === 'system' && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
       } catch { document.documentElement.dataset.theme = 'light'; }
     </script>
-    <title>Ders Stüdyosu</title>
+    <title>Kavra</title>
   </head>
   <body>
     <div id="root"></div>

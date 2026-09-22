@@ -92,12 +92,16 @@ def _summarize_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def summarize_project(pdir: Path) -> dict[str, Any]:
-    return _summarize_entries(_load(_ledger_path(pdir))["entries"])
+    entries = _load(_ledger_path(pdir))["entries"]
+    for path in (pdir / "videos").glob(f"*/{LEDGER_FILE}"):
+        entries.extend(_load(path)["entries"])
+    return _summarize_entries(entries)
 
 
 def summarize_all_projects(projects_dir: Path) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     if projects_dir.exists():
-        for ledger_path in projects_dir.glob(f"*/{LEDGER_FILE}"):
+        paths = list(projects_dir.glob(f"*/{LEDGER_FILE}")) + list(projects_dir.glob(f"*/videos/*/{LEDGER_FILE}"))
+        for ledger_path in paths:
             entries.extend(_load(ledger_path)["entries"])
     return _summarize_entries(entries)

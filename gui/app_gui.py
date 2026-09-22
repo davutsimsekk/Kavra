@@ -14,7 +14,7 @@ from app.pipeline import load_script, parse_and_cache, project_dir_for, render_v
 from app.tts import PROVIDER_LABELS, list_voices
 from app.video.themes import THEME_LABELS
 
-APP_TITLE = "Ders Stüdyosu — MD/PPTX/PDF → Sesli/Görüntülü Ders"
+APP_TITLE = "Kavra — MD/PPTX/PDF → Sesli/Görüntülü Ders"
 
 
 class App(tk.Tk):

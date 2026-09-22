@@ -58,7 +58,8 @@ def apply_regeneration(
         raise ValueError("Yeniden üretim boş sonuç döndürdü.")
     start, end = resolve_sibling_range(slides, index)
     for slide in fresh_slides:
-        slide.source_section_ids = list(target.source_section_ids)
-        slide.source_titles = list(target.source_titles)
+        if not (slide.background_image and slide.source_section_ids and set(slide.source_section_ids).issubset(target.source_section_ids)):
+            slide.source_section_ids = list(target.source_section_ids)
+            slide.source_titles = list(target.source_titles)
         slide.manually_edited = False
     return slides[:start] + fresh_slides + slides[end:]

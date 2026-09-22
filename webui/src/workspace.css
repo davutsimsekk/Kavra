@@ -34,6 +34,8 @@ button { line-height:1.4; }
 .panel-toolbar h3 { font-size:17px; margin:3px 0 0; }
 .kicker,.topbar-eyebrow { font-size:11px; letter-spacing:.12em; }
 .brand-mark { background:var(--accent); box-shadow:none; flex-shrink:0; }
+.brand-mark.logo { width:var(--mark,39px); height:var(--mark,39px); background:none; border-radius:0; display:block; }
+.brand-mark.logo img { display:block; width:100%; height:100%; user-select:none; }
 .workspace-header { width:100%; max-width:1320px; margin:0 auto; display:flex; align-items:center; gap:30px; padding:0 0 22px; border-bottom:1px solid var(--line); }
 .workspace-brand { display:flex; gap:12px; align-items:center; background:none; border:0; padding:0; text-align:left; cursor:pointer; }
 .workspace-brand strong { font-size:16px; white-space:nowrap; }

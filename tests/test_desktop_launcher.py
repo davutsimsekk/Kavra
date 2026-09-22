@@ -30,9 +30,9 @@ class DesktopLauncherTests(unittest.TestCase):
         executable = Path("C:/Edge/msedge.exe")
         profile = Path("D:/cache/session_1")
 
-        args = browser_app_args(executable, "http://127.0.0.1:8765", profile)
+        args = browser_app_args(executable, "http://127.0.0.1:8768", profile)
 
-        self.assertIn("--app=http://127.0.0.1:8765", args)
+        self.assertIn("--app=http://127.0.0.1:8768", args)
         self.assertIn(f"--user-data-dir={profile}", args)
         self.assertIn("--no-first-run", args)
 

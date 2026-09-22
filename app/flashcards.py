@@ -250,6 +250,20 @@ def _coerce_llm_cards(raw_items: list) -> list[dict[str, str]]:
     return cards
 
 
+def _call_generator(generator: Any, prompt: str) -> str:
+    """generator._call(prompt) çağırır. OpenAI-uyumlu sağlayıcının OpenRouter
+    üzerinde varsayılan olarak zorladığı yapılandırılmış çıktı şeması DERS
+    SLAYTLARI içindir (bkz. app.llm.openai_compatible_provider._call
+    docstring'i) — flashcard'ların şekli bundan tamamen farklı olduğundan bu
+    zorlamayı burada devre dışı bırakıyoruz, aksi halde model "prompt"/kart
+    alanları olmayan slayt-şekilli nesneler döndürüp doğrulama başarısız olur."""
+    from app.llm.openai_compatible_provider import OpenAICompatibleNarrationGenerator
+
+    if isinstance(generator, OpenAICompatibleNarrationGenerator):
+        return generator._call(prompt, json_schema=None)
+    return generator._call(prompt)
+
+
 def generate_llm_deck(slides: list[Slide], generator: Any, count: int | None = None,
                        focus_prompt: str = "") -> list[dict[str, Any]]:
     """Bir LLM sağlayıcısı (Agent CLI / Gemini / OpenAI-uyumlu — hepsi
@@ -263,7 +277,7 @@ def generate_llm_deck(slides: list[Slide], generator: Any, count: int | None = N
     if not source_text.strip():
         raise ValueError("Kart üretmek için yeterli anlatı içeriği yok.")
     prompt = _build_llm_deck_prompt(source_text, count, focus_prompt)
-    raw_text = generator._call(prompt)
+    raw_text = _call_generator(generator, prompt)
     try:
         data = extract_json_array(raw_text)
     except (ValueError, TypeError):
@@ -271,7 +285,7 @@ def generate_llm_deck(slides: list[Slide], generator: Any, count: int | None = N
             "Aşağıdaki metni SADECE geçerli bir JSON dizisine çevir, "
             "başka hiçbir şey yazma:\n\n" + raw_text
         )
-        data = extract_json_array(generator._call(fix_prompt))
+        data = extract_json_array(_call_generator(generator, fix_prompt))
     raw_cards = _coerce_llm_cards(data)
     if not raw_cards:
         raise ValueError("Model geçerli hiçbir flashcard üretmedi.")
@@ -361,15 +375,52 @@ def get_deck(pdir: Path, deck_id: str) -> dict[str, Any] | None:
         return None
 
 
+def source_batches(slides: list[Slide]) -> list[list[Slide]]:
+    batches, current, size = [], [], 0
+    for slide in slides:
+        length = len(slide.title) + len(slide.narration) + 20
+        if length > 24000:
+            raise ValueError("Bir kaynak bölümü çok uzun. Daha küçük bölümlere ayırarak yükle.")
+        if current and size + length > 24000:
+            batches.append(current)
+            current, size = [], 0
+        current.append(slide)
+        size += length
+    if current:
+        batches.append(current)
+    if not batches:
+        raise ValueError("Seçili kaynaklarda kart oluşturacak metin yok.")
+    if len(batches) > 12:
+        raise ValueError("Bu seçim 12'den fazla yapay zeka çağrısı gerektiriyor. Maliyeti sınırlamak için daha az kaynak seç.")
+    return batches
+
+
 def create_deck(pdir: Path, name: str, kind: str, slides: list[Slide], *,
                  generator: Any = None, count: int | None = None,
-                 focus_prompt: str = "") -> dict[str, Any]:
+                 focus_prompt: str = "", source_context: dict | None = None) -> dict[str, Any]:
     if kind not in DECK_KINDS:
         raise ValueError(f"Bilinmeyen deste türü: {kind!r} (beklenen: {sorted(DECK_KINDS)})")
     if kind == "llm":
         if generator is None:
             raise ValueError("Yapay zeka ile üretim için bir LLM sağlayıcısı gerekli.")
-        cards = generate_llm_deck(slides, generator, count=count, focus_prompt=focus_prompt)
+        if source_context:
+            batches = source_batches(slides)
+            cards = []
+            target_count = count if count is not None else min(60, max(20, len(batches) * 8))
+            if target_count < len(batches):
+                raise ValueError("Kart hedefi, seçili kaynakların parça sayısından az olamaz.")
+            for index, batch in enumerate(batches):
+                batch_count = target_count // len(batches) + (index < target_count % len(batches))
+                cards.extend(generate_llm_deck(batch, generator, count=batch_count, focus_prompt=focus_prompt)[:batch_count])
+            unique = {}
+            for card in cards:
+                key = (card["front"].strip().casefold(), card["back"].strip().casefold())
+                if key not in unique:
+                    card["id"] = uuid.uuid4().hex[:16]
+                    unique[key] = card
+            cards = list(unique.values())
+        else:
+            cards = generate_llm_deck(slides, generator, count=count, focus_prompt=focus_prompt)
     else:
         cards = generate_deck(slides)
     deck = {
@@ -379,6 +430,12 @@ def create_deck(pdir: Path, name: str, kind: str, slides: list[Slide], *,
         "createdAt": time.time(),
         "cards": cards,
     }
+    if source_context:
+        deck.update(source_context)
+        for card in cards:
+            index = card.get("sourceSlideIndex")
+            if index is not None and index < len(source_context["sourceRefs"]):
+                card.update(source_context["sourceRefs"][index])
     if kind == "llm" and focus_prompt.strip():
         deck["focusPrompt"] = focus_prompt.strip()
     _save_deck_file(pdir, deck)
@@ -397,6 +454,10 @@ def regenerate_deck_cards(pdir: Path, deck_id: str, slides: list[Slide]) -> dict
     if deck.get("kind") != "static":
         raise ValueError("Yalnızca statik desteler kaynaktan yeniden oluşturulabilir.")
     deck["cards"] = generate_deck(slides, existing_cards=deck["cards"])
+    for card in deck["cards"]:
+        index = card.get("sourceSlideIndex")
+        if index is not None and index < len(deck.get("sourceRefs", [])):
+            card.update(deck["sourceRefs"][index])
     _save_deck_file(pdir, deck)
     return deck
 

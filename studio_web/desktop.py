@@ -23,9 +23,10 @@ from typing import Mapping
 import uvicorn
 
 from app.config import CACHE_DIR, ROOT
+from studio_web.main import APP_HOST, APP_PORT
 
 
-APP_URL = "http://127.0.0.1:8765"
+APP_URL = f"http://{APP_HOST}:{APP_PORT}"
 
 
 def browser_candidates(environ: Mapping[str, str] | None = None) -> list[tuple[str, Path]]:
@@ -105,8 +106,8 @@ def launch_desktop(url: str = APP_URL) -> int:
     if owns_server:
         config = uvicorn.Config(
             "studio_web.api:app",
-            host="127.0.0.1",
-            port=8765,
+            host=APP_HOST,
+            port=APP_PORT,
             log_level="warning",
         )
         server = uvicorn.Server(config)
@@ -114,7 +115,7 @@ def launch_desktop(url: str = APP_URL) -> int:
         server_thread.start()
         if not wait_for_server(url):
             server.should_exit = True
-            raise RuntimeError("Yerel Ders Stüdyosu servisi 20 saniyede başlayamadı.")
+            raise RuntimeError("Yerel Kavra servisi 20 saniyede başlayamadı.")
 
     try:
         browser = find_app_browser()
@@ -128,13 +129,13 @@ def launch_desktop(url: str = APP_URL) -> int:
                 cwd=ROOT,
                 creationflags=creation_flags,
             )
-            print(f"Ders Stüdyosu {label} uygulama penceresinde açıldı.")
+            print(f"Kavra {label} uygulama penceresinde açıldı.")
             return process.wait()
 
         # App-mode capable bir tarayıcı bulunamazsa işlevsiz kalmak yerine normal
         # varsayılan tarayıcıya düş. Bu modda terminal Ctrl+C ile kapatılır.
         webbrowser.open(url)
-        print("Edge/Chrome bulunamadı; Ders Stüdyosu varsayılan tarayıcıda açıldı.")
+        print("Edge/Chrome bulunamadı; Kavra varsayılan tarayıcıda açıldı.")
         if owns_server and server_thread:
             while server_thread.is_alive():
                 time.sleep(0.5)
@@ -160,7 +161,7 @@ def diagnostics() -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Ders Stüdyosu masaüstü başlatıcısı")
+    parser = argparse.ArgumentParser(description="Kavra masaüstü başlatıcısı")
     parser.add_argument("--check", action="store_true", help="Pencere açmadan kurulumu denetle")
     args = parser.parse_args(argv)
     if args.check:

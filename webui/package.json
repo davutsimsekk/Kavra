@@ -1,12 +1,13 @@
 {
-  "name": "ders-studyosu-webui",
+  "name": "kavra-webui",
   "private": true,
   "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test src/*.test.js"
   },
   "dependencies": {
     "lucide-react": "^1.45.0",

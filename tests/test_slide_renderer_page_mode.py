@@ -29,7 +29,7 @@ class BackgroundImageRenderTests(unittest.TestCase):
                 # Sağ/sol pillarbox şeritleri siyah kalmalı (kaynak resim ortalanmış).
                 self.assertEqual(result.getpixel((2, 540)), (0, 0, 0))
 
-    def test_missing_background_image_falls_back_to_theme_rendering(self):
+    def test_missing_background_image_fails_instead_of_silently_redesigning(self):
         with tempfile.TemporaryDirectory() as tmp:
             out_path = Path(tmp) / "slide_001.png"
             slide = Slide(
@@ -37,11 +37,10 @@ class BackgroundImageRenderTests(unittest.TestCase):
                 background_image=str(Path(tmp) / "olmayan.png"),
             )
 
-            render_slide(slide, 1, 1, "", out_path, width=1920, height=1080)
+            with self.assertRaisesRegex(FileNotFoundError, "PDF sayfa görseli"):
+                render_slide(slide, 1, 1, "", out_path, width=1920, height=1080)
+            self.assertFalse(out_path.exists())
 
-            self.assertTrue(out_path.exists())
-            with Image.open(out_path) as result:
-                self.assertEqual(result.size, (1920, 1080))
 
 
 class EmbeddedImageRenderTests(unittest.TestCase):

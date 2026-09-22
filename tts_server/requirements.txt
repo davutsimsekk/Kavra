@@ -1,0 +1,10 @@
+# Kavra uzak TTS sunucusu (Colab/GPU makinesi). torch Colab'da hazır gelir; burada kurulmaz.
+# Sürümler bu depoda uçtan uca (XTTS v2 + Piper) sınanan serilerle aynıdır.
+fastapi==0.141.1
+uvicorn==0.52.4
+python-dotenv==1.2.3
+coqui-tts==0.27.5
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+piper-tts==1.8.0

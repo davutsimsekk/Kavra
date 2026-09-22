@@ -1,0 +1,41 @@
+name: kavra
+
+services:
+  kavra:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # GPU'suz sunucuda .env içine KAVRA_LOCAL_TTS=0 yaz (hafif imaj, bkz. DOCKER.md §8).
+        LOCAL_TTS: "${KAVRA_LOCAL_TTS:-1}"
+    image: kavra:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "127.0.0.1:${KAVRA_PORT:-8768}:8768"
+    environment:
+      CHATTERBOX_HF_HUB_OFFLINE: "${CHATTERBOX_HF_HUB_OFFLINE:-0}"
+      # Sunucuda erişim için alan adı (örn. Tailscale MagicDNS adı); bkz. DOCKER.md §8.
+      KAVRA_ALLOWED_HOSTS: "${KAVRA_ALLOWED_HOSTS:-}"
+      # Farklı KAVRA_PORT kullanılınca arayüzün Origin'i (http://127.0.0.1:PORT) reddedilmesin.
+      KAVRA_PUBLISHED_PORT: "${KAVRA_PORT:-8768}"
+      KAVRA_ALLOWED_ORIGINS: "${KAVRA_ALLOWED_ORIGINS:-}"
+    volumes:
+      - ./docker-data:/data/runtime
+      - ./_cache:/data/_cache
+      - ./models:/data/models
+      - ./projects:/data/projects
+      - ./study_data:/data/study_data
+    shm_size: "2gb"
+    stop_grace_period: 45s
+    # Video render (FFmpeg) CPU'yu doldurabilir; VPS'te başka bir site/servis varsa onu
+    # açlıktan öldürmesin diye üst sınır koyuyoruz. .env'den KAVRA_CPU_LIMIT / KAVRA_MEM_LIMIT
+    # ile ayarlanabilir. Tek kullanıcılık bir makinede bu sınırları gevşetebilirsin.
+    deploy:
+      resources:
+        limits:
+          cpus: "${KAVRA_CPU_LIMIT:-2}"
+          memory: "${KAVRA_MEM_LIMIT:-4g}"

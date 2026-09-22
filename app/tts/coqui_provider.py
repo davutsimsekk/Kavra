@@ -3,24 +3,82 @@ from pathlib import Path
 
 from app.config import MODELS_DIR
 from app.models import SynthResult
-from app.tts.base import TTSProvider
+from app.tts.base import TTSProvider, local_engine_unavailable
 
 SPEAKERS_DIR = MODELS_DIR / "coqui_speakers"
 
 
+def _patch_xtts_audio_loading() -> None:
+    """XTTS'in klonlanmış-ses referans dosyasını okumak için kullandığı
+    TTS.tts.models.xtts.load_audio, içeride torchaudio.load()'u çağırıyor.
+    Bu ortamdaki torchaudio (2.11+) artık HER ZAMAN TorchCodec (FFmpeg tabanlı)
+    decoder'ı kullanıyor — `backend=` parametresi bile görmezden geliniyor —
+    ve TorchCodec'in derlenmiş DLL'leri (libtorchcodec_core4-9.dll) bu venv'de
+    denenen hiçbir FFmpeg sürümüyle yüklenemiyor. Sonuç: klonlanmış bir ses her
+    kullanılmaya çalışıldığında OSError ile patlıyor — builtin:default hiç
+    etkilenmiyor çünkü o hiç dosya decode etmiyor. soundfile (zaten TTS'in
+    kendi bağımlılığı) aynı dosyayı TorchCodec'e hiç uğramadan okuyabiliyor,
+    bu yüzden load_audio'yu import anında bununla değiştiriyoruz.
+    """
+    import torch
+    import torchaudio
+    from TTS.tts.models import xtts as xtts_module
+
+    if getattr(xtts_module.load_audio, "_ders_video_patched", False):
+        return
+
+    def load_audio(audiopath, sampling_rate):
+        import soundfile as sf
+
+        data, sr = sf.read(str(audiopath), dtype="float32", always_2d=True)
+        audio = torch.from_numpy(data.T)  # (kanal, örnek)
+
+        if audio.size(0) != 1:
+            audio = torch.mean(audio, dim=0, keepdim=True)
+        if sr != sampling_rate:
+            audio = torchaudio.functional.resample(audio, sr, sampling_rate)
+
+        audio.clip_(-1, 1)
+        return audio
+
+    load_audio._ders_video_patched = True
+    xtts_module.load_audio = load_audio
+
+
 class CoquiTTSProvider(TTSProvider):
     """Coqui XTTS v2: offline, çok dilli, ses klonlama destekli ama ağır (torch + ~2GB model).
-    Kurulu değilse açık bir hata verir; kurulum için gui/install_coqui.py kullan."""
+    Kurulu değilse açık bir hata verir; kurulum için gui/install_coqui.py kullan.
+
+    Performans notu (RTX 4060 üzerinde ölçüldü): tekil çağrıda VRAM'in tamamının
+    dolmaması ve GPU kullanımının dalgalı görünmesi BEKLENEN bir durumdur — XTTS
+    v2'nin GPT tabanlı kod çözücüsü otomatik-regresif çalışır (token token, küçük
+    ardışık işlemler). `torch.backends.cudnn.benchmark`, TF32 ve `autocast(fp16)`
+    bu depoda gerçek bir seste ölçülüp denendi: cudnn.benchmark ve autocast(fp16)
+    süreyi ~5 kat KÖTÜLEŞTİRDİ, TF32 ölçülebilir bir fark yaratmadı — hiçbiri
+    kullanılmıyor.
+
+    Aynı GPU çağrısına birden fazla slaytı paketlemek (tensor-batching) de
+    denendi ve KALDIRILDI: kısa sentetik cümlelerde hızlanma ölçülse de gerçek
+    (uzun) slayt anlatımlarında GPU zaten sürekli meşgul kaldığından ölçülebilir
+    bir fayda sağlamadı (RTF sıralıyla aynı, ~0.87-0.89). Gerçek kazanç
+    BAĞIMSIZ PROCESS'lerde aynı anda birden fazla model çalıştırmaktan geliyor
+    — bkz. app.tts.coqui_parallel.synthesize_parallel. Bu sağlayıcı kendisi
+    her zaman sıralı/tekil üretim yapar; paralellik bir üst katmanın işidir.
+    """
     name = "coqui"
 
     def __init__(self, gpu: bool | None = None):
         try:
             from TTS.api import TTS
         except ImportError as e:
-            raise RuntimeError(
+            raise RuntimeError(local_engine_unavailable(
+                "XTTS v2",
                 "Coqui TTS kurulu değil. GUI'deki 'Coqui XTTS Kur' butonunu kullan "
-                "veya: venv\\Scripts\\pip install TTS torch --index-url https://download.pytorch.org/whl/cpu"
-            ) from e
+                "veya: venv\\Scripts\\pip install TTS torch --index-url https://download.pytorch.org/whl/cpu",
+                remote_ok=True,
+            )) from e
+
+        _patch_xtts_audio_loading()
 
         if gpu is None:
             try:
@@ -31,6 +89,15 @@ class CoquiTTSProvider(TTSProvider):
 
         self.gpu = gpu
         self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=gpu)
+        # Klonlanmış bir ses (speaker_wav) kullanıldığında, coqui-tts'in yüksek
+        # seviyeli tts_to_file() yolu HER çağrıda referans wav'ı yeniden kodlayıp
+        # konuşmacı koşullandırmasını (conditioning latents) baştan hesaplıyor
+        # (bkz. TTS.utils.voices.CloningMixin.clone_voice). Bir derste onlarca
+        # slayt aynı klonlanmış sesi kullandığından bu, slayt başına gereksiz bir
+        # GPU/CPU encoder geçişi demek. Koşullandırmayı ses başına BİR KEZ
+        # hesaplayıp bu sağlayıcı örneğinin (bir render işi boyunca yaşar) ömrü
+        # süresince bellekte tutuyor, konuşmacı tablosuna elle ekliyoruz.
+        self._cloned_speaker_ids: dict[str, str] = {}
 
     def list_voices(self) -> list[dict]:
         voices = [{"id": "builtin:default", "label": "Varsayılan (XTTS dahili konuşmacı)"}]
@@ -39,12 +106,30 @@ class CoquiTTSProvider(TTSProvider):
                 voices.append({"id": str(wav), "label": f"Klonlanmış: {wav.stem}"})
         return voices
 
+    def _resolve_speaker_id(self, voice: str) -> str:
+        """Bu ses için model.speaker_manager.speakers içinde bir giriş bulunmasını
+        sağlar (yerleşikse doğrudan, klonlanmışsa önbellekten ya da bir kez
+        hesaplayıp) ve o girişin anahtarını döndürür."""
+        if not voice or voice == "builtin:default":
+            default = self.tts.speakers[0] if getattr(self.tts, "speakers", None) else None
+            if default is None:
+                raise RuntimeError("Kullanılabilir konuşmacı yok.")
+            return default
+
+        speaker_id = self._cloned_speaker_ids.get(voice)
+        if speaker_id is None:
+            model = self.tts.synthesizer.tts_model
+            gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=voice)
+            speaker_id = f"cloned::{voice}"
+            model.speaker_manager.speakers[speaker_id] = {
+                "gpt_conditioning_latents": gpt_cond_latent,
+                "speaker_embedding": speaker_embedding,
+            }
+            self._cloned_speaker_ids[voice] = speaker_id
+        return speaker_id
+
     def synthesize(self, text: str, voice: str, out_path: Path, rate: str = "+0%") -> SynthResult:
-        kwargs = dict(text=text, language="tr", file_path=str(out_path))
-        if voice and voice != "builtin:default":
-            kwargs["speaker_wav"] = voice
-        else:
-            kwargs["speaker"] = self.tts.speakers[0] if getattr(self.tts, "speakers", None) else None
+        kwargs = dict(text=text, language="tr", file_path=str(out_path), speaker=self._resolve_speaker_id(voice))
         self.tts.tts_to_file(**kwargs)
 
         result = subprocess.run(

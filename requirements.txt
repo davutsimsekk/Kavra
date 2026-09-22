@@ -1,38 +1,18 @@
-# =============================================================
-# Ders Stüdyosu - Python bağımlılıkları
-# Kurulum: pip install -r requirements.txt
-# (Windows önerisi: önce d_env.sh içindeki ortam değişkenlerini
-#  uygulayın ya da .bat dosyalarını kullanın; app/config.py de
-#  TEMP/pip/HF cache'lerini zaten otomatik olarak _cache/ altına
-#  yönlendirir, C: sürücüsüne yazılmaz.)
-# =============================================================
+# Kavra core runtime (Python 3.14 ile doğrulandı)
+# Kurulum: python -m pip install -r requirements.txt
+# Ağır yerel ses motorları için ayrıca requirements-tts.txt kullanılır.
 
-# --- Çekirdek (her zaman gerekli) ---
-pillow>=12.3,<13
-edge-tts>=7.2,<8
-python-pptx>=1.0,<2
-pymupdf>=1.28,<2
-pygments>=2.21,<3
-python-dotenv>=1.2,<2
-requests>=2.34,<3
-onnxruntime>=1.30,<2
-piper-tts>=1.8,<2
-google-genai>=2.23,<3
-fastapi>=0.141,<1
-uvicorn>=0.52,<1
-python-multipart>=0.0.32,<0.1
-
-# --- Test (opsiyonel, geliştirme için) ---
-# pytest>=8
-# httpx>=0.28
-
-# --- Opsiyonel: Coqui XTTS v2 (offline + ses klonlama) — ağır, ayrı kurulur ---
-#   venv\Scripts\python.exe install_coqui.py
-# (install_coqui.py, NVIDIA GPU varsa CUDA'lı torch'u otomatik seçer)
-# coqui-tts
-# torch --index-url https://download.pytorch.org/whl/cu128
-# torchaudio --index-url https://download.pytorch.org/whl/cu128
-# torchcodec
-# transformers<5.0,>=4.57
-# tokenizers>=0.22.0,<=0.23.0
-# huggingface-hub>=0.34.0,<1.0
+pillow==12.3.0
+edge-tts==7.2.8
+python-pptx==1.0.2
+python-docx==1.2.0
+pymupdf==1.28.2
+pygments==2.21.0
+python-dotenv==1.2.3
+requests==2.34.2
+onnxruntime==1.30.0
+piper-tts==1.8.0
+google-genai==2.23.0
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32

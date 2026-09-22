@@ -143,6 +143,10 @@ select { color-scheme: inherit; }
 .resume-note button:hover:not(:disabled) { color: var(--accent); }
 .resume-note button:disabled { opacity: .4; cursor: not-allowed; }
 .generate-button, .render-button { margin: auto 16px 14px; min-height: 42px; }
+.render-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 16px 14px; }
+.render-actions .render-button { flex: 1 1 220px; margin: 0; }
+.render-actions .button.danger { color: var(--danger); border-color: rgba(255,127,131,.28); background: rgba(255,127,131,.055); }
+.render-actions .button.danger:hover:not(:disabled) { background: rgba(255,127,131,.11); }
 .job-strip { margin: 0 16px 15px; padding: 9px 10px; background: color-mix(in srgb, var(--accent) 5%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 11%, transparent); border-radius: 10px; }
 .job-strip.failed { background: rgba(255,127,131,.06); border-color: rgba(255,127,131,.15); }
 .job-copy { display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 6px; font-size: 12px; }

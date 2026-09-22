@@ -151,6 +151,47 @@ class GeneratorTests(unittest.TestCase):
         self.assertEqual(payload["provider"]["sort"], "throughput")
         self.assertEqual(payload["max_tokens"], 16_000)
 
+    @patch("app.llm.openai_compatible_provider.requests.post")
+    def test_call_with_json_schema_none_omits_the_slide_schema(self, post):
+        """Regresyon testi: exam_routes.py ve app.flashcards, ders slaytı
+        DIŞINDA bir şey (sınav sorusu, flashcard) isterken generator._call'ı
+        json_schema=None ile çağırıyor — OpenRouter'a zorlanan yapı hâlâ
+        slayt şekli olursa model "prompt"/kart alanı olmayan nesneler
+        döndürüp çağıranın kendi doğrulaması başarısız oluyordu."""
+        post.return_value = make_response(body={
+            "choices": [{"message": {"content": '{"anything": "goes"}'}}]
+        })
+        generator = OpenAICompatibleNarrationGenerator(
+            endpoint="https://openrouter.ai/api/v1",
+            model="openai/test-model",
+            api_key="secret",
+        )
+
+        result = generator._call("bir sınav sorusu üret", json_schema=None)
+
+        self.assertEqual(result, '{"anything": "goes"}')
+        payload = post.call_args.kwargs["json"]
+        self.assertNotIn("response_format", payload)
+        # OpenRouter yönlendirme tercihleri (throughput/require_parameters) yine korunmalı.
+        self.assertTrue(payload["provider"]["require_parameters"])
+        self.assertEqual(payload["max_tokens"], 16_000)
+
+    @patch("app.llm.openai_compatible_provider.requests.post")
+    def test_call_without_json_schema_kwarg_defaults_to_the_slide_schema(self, post):
+        post.return_value = make_response(body={
+            "choices": [{"message": {"content": self.slide_json}}]
+        })
+        generator = OpenAICompatibleNarrationGenerator(
+            endpoint="https://openrouter.ai/api/v1",
+            model="openai/test-model",
+            api_key="secret",
+        )
+
+        generator._call("bir slayt üret")
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+
 
 if __name__ == "__main__":
     unittest.main()

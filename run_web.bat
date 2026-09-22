@@ -22,7 +22,7 @@ if not exist "%ROOT%webui\dist\index.html" (
   call npm --prefix "%ROOT%webui" run build
   if errorlevel 1 goto :error
 )
-echo Ders Studyosu http://127.0.0.1:8765 adresinde aciliyor...
+echo Kavra http://127.0.0.1:8768 adresinde aciliyor...
 "%ROOT%venv\Scripts\python.exe" -m studio_web.main
 goto :eof
 :error

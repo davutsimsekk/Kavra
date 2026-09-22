@@ -183,6 +183,38 @@ class CoerceLlmCardsTests(unittest.TestCase):
         self.assertEqual(len(cards), 60)
 
 
+class CallGeneratorOpenAiSchemaTests(unittest.TestCase):
+    """Regresyon testi: OpenAICompatibleNarrationGenerator._call'ın OpenRouter'da
+    varsayılan olarak zorladığı DERS SLAYTI şeması flashcard'lar için yanlış —
+    generate_llm_deck bunun yerine json_schema=None ile çağırmalı, aksi
+    halde model "front"/"back" alanı olmayan slayt-şekilli nesneler döndürüp
+    _coerce_llm_cards hiçbir kart bulamaz."""
+
+    def test_openai_compatible_generator_is_called_with_json_schema_none(self):
+        from unittest.mock import Mock, patch
+
+        from app.flashcards import _call_generator
+        from app.llm.openai_compatible_provider import OpenAICompatibleNarrationGenerator
+
+        generator = OpenAICompatibleNarrationGenerator(
+            endpoint="https://openrouter.ai/api/v1", model="openai/test-model", api_key="secret",
+        )
+        with patch.object(generator, "_call", return_value="ok") as fake_call:
+            result = _call_generator(generator, "bir istem")
+
+        fake_call.assert_called_once_with("bir istem", json_schema=None)
+        self.assertEqual(result, "ok")
+
+    def test_other_generators_are_called_without_the_extra_kwarg(self):
+        from app.flashcards import _call_generator
+
+        generator = FakeGenerator(["ok"])
+        result = _call_generator(generator, "bir istem")
+
+        self.assertEqual(generator.calls, ["bir istem"])
+        self.assertEqual(result, "ok")
+
+
 class GenerateLlmDeckTests(unittest.TestCase):
     def _slides(self):
         return [Slide(title="Pointer", narration="Pointer bir bellek adresi tutar.", bullets=["Adres tutar"])]

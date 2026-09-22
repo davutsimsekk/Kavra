@@ -1,0 +1,12 @@
+.remote-gpu { grid-column: 1 / -1; display: grid; gap: 10px; }
+.remote-gpu-title { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.remote-gpu-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.remote-gpu-card.active { border-color: var(--accent); }
+.remote-gpu-head { display: flex; align-items: center; gap: 8px; }
+.remote-gpu-radio { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+.remote-gpu-radio input { margin: 0; accent-color: var(--accent); }
+.remote-gpu-hint { color: var(--muted); }
+.remote-gpu-saved { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--accent); font-size: 11px; }
+.remote-gpu-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.remote-gpu-ok { color: var(--accent); }
+.remote-gpu-card input { width: 100%; }

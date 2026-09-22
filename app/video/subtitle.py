@@ -64,6 +64,16 @@ def write_srt(words: list[WordTiming], out_path: Path):
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def escape_ass_text(text: str) -> str:
+    r"""Altyazı metnini ASS'de olduğu gibi görünecek şekilde kaçışlar.
+
+    ASS'de `{...}` bir geçersiz kılma bloğudur (içindeki metin kaybolur) ve `\N`, `\n`, `\h`
+    dizileri satır sonu/boşluk sayılır. libass ile sınandı: `\{` `\}` süslü parantezi doğru gösterir;
+    `\\` çalışmaz, bu yüzden ters eğik çizgiden sonra sıfır genişlikli boşluk (U+200B) konur."""
+    text = text.replace("\\", "\\\u200b")
+    return text.replace("{", "\\{").replace("}", "\\}")
+
+
 def _fmt_ass(t: float) -> str:
     h = int(t // 3600)
     m = int((t % 3600) // 60)
@@ -97,7 +107,7 @@ def write_ass(words: list[WordTiming], out_path: Path, width: int, height: int,
         while i < len(words):
             group = words[i:i + WORDS_PER_CAPTION]
             start, end = group[0].start, group[-1].end
-            caption = " ".join(w.text for w in group).replace("\n", " ")
+            caption = escape_ass_text(" ".join(w.text for w in group).replace("\n", " "))
             events.append(f"Dialogue: 0,{_fmt_ass(start)},{_fmt_ass(end)},Default,,0,0,0,,{caption}")
             i += WORDS_PER_CAPTION
     out_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")

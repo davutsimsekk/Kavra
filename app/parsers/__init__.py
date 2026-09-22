@@ -5,7 +5,8 @@ from app.models import RawSection
 
 def parse_source(path: str | Path, page_mode: bool = False, pdir: Path | None = None,
                   vision_enrich: bool = False, vision_api_key: str | None = None,
-                  vision_model: str | None = None, extract_diagrams: bool = False) -> list[RawSection]:
+                  vision_model: str | None = None, extract_diagrams: bool = False,
+                  keep_empty_pages: bool = False) -> list[RawSection]:
     path = Path(path)
     ext = path.suffix.lower()
     if page_mode and ext != ".pdf":
@@ -27,6 +28,6 @@ def parse_source(path: str | Path, page_mode: bool = False, pdir: Path | None = 
         return p(
             path, page_mode=page_mode, pdir=pdir, vision_enrich=vision_enrich,
             vision_api_key=vision_api_key, vision_model=vision_model,
-            extract_diagrams=extract_diagrams,
+            extract_diagrams=extract_diagrams, keep_empty_pages=keep_empty_pages,
         )
     raise ValueError(f"Desteklenmeyen dosya türü: {ext} (.md, .pptx, .pdf destekleniyor)")

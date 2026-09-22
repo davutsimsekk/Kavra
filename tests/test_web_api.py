@@ -34,6 +34,11 @@ class WebApiTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app, base_url="http://localhost")
 
+    def test_bootstrap_says_whether_the_output_folder_can_be_opened(self):
+        import os
+        payload = self.client.get("/api/bootstrap").json()
+        self.assertEqual(payload["canOpenFolder"], os.name == "nt")
+
     def test_bootstrap_exposes_ui_catalogs_without_secret_values(self):
         response = self.client.get("/api/bootstrap")
         self.assertEqual(response.status_code, 200)
@@ -149,15 +154,25 @@ class WebApiTests(unittest.TestCase):
     def test_export_returns_downloadable_file_for_each_known_kind(self):
         slide = Slide(title="if / else", narration="Kısa anlatım metni burada duruyor.")
         with _temp_project([slide]) as pdir:
-            for kind in ("notes", "transcript", "anki", "quiz"):
+            for kind in ("notes", "transcript", "anki", "quiz", "pdf"):
                 response = self.client.get(f"/api/projects/{pdir.name}/export/{kind}")
                 self.assertEqual(response.status_code, 200, kind)
                 self.assertGreater(len(response.content), 0, kind)
+                if kind == "pdf":
+                    self.assertEqual(response.headers["content-type"], "application/pdf")
+                    self.assertTrue(response.content.startswith(b"%PDF"))
 
     def test_export_rejects_unknown_kind(self):
         with _temp_project([Slide(title="x", narration="y")]) as pdir:
-            response = self.client.get(f"/api/projects/{pdir.name}/export/pdf")
+            response = self.client.get(f"/api/projects/{pdir.name}/export/epub")
             self.assertEqual(response.status_code, 404)
+
+    def test_pdf_export_rejects_unknown_theme(self):
+        with _temp_project([Slide(title="x", narration="y")]) as pdir:
+            response = self.client.get(
+                f"/api/projects/{pdir.name}/export/pdf?theme=bilinmeyen"
+            )
+            self.assertEqual(response.status_code, 400)
 
     def test_regenerate_rejects_manually_added_slide_without_source(self):
         with _temp_project([Slide(title="Elle eklendi")]) as pdir:
@@ -438,7 +453,7 @@ class GenerateEndpointPageModeTests(unittest.TestCase):
             response = self.client.get(f"/api/projects/{pdir.name}")
             self.assertFalse(response.json()["pageMode"])
 
-    def test_page_mode_forces_one_section_per_call_and_disables_single_request(self):
+    def test_page_mode_honors_section_batch_size_and_safe_single_request(self):
         with _temp_project([], sections=self._page_sections()) as pdir:
             with patch("app.llm.agent_cli_provider.AgentCliNarrationGenerator") as fake_cls:
                 fake_cls.return_value.generate_chunked.return_value = []
@@ -460,8 +475,8 @@ class GenerateEndpointPageModeTests(unittest.TestCase):
                 self.assertEqual(job["status"], "complete", job.get("error"))
 
                 _, kwargs = fake_cls.return_value.generate_chunked.call_args
-                self.assertEqual(kwargs["max_sections_per_chunk"], 1)
-                self.assertFalse(kwargs["single_request"])
+                self.assertEqual(kwargs["max_sections_per_chunk"], 10)
+                self.assertTrue(kwargs["single_request"])
                 self.assertTrue(kwargs["single_slide_per_section"])
 
     def test_page_mode_assigns_background_image_from_source_page(self):
@@ -974,6 +989,83 @@ class FlashcardDeckEndpointTests(unittest.TestCase):
                 headers={"Origin": "http://127.0.0.1:5173"}, json={},
             )
             self.assertEqual(response.status_code, 404)
+
+
+class RenderCoquiParallelWorkersValidationTests(unittest.TestCase):
+    """/render'ın yeni coquiParallelWorkers alanını doğrulamasını test eder —
+    bkz. app.tts.coqui_parallel.MAX_PARALLEL_WORKERS (bu depoda 4 paralel
+    Coqui process'i gerçek bir sistem çökmesine yol açtığı için bu üst sınır
+    kasıtlı olarak düşük ve backend'de de zorunlu kılınıyor, yalnızca
+    arayüzde değil)."""
+
+    def setUp(self):
+        self.client = TestClient(app, base_url="http://localhost")
+
+    @staticmethod
+    def _slide():
+        return Slide(title="Slayt", narration="Kısa bir anlatım metni burada duruyor.")
+
+    def test_rejects_worker_count_above_the_safety_ceiling(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/render",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"ttsProvider": "coqui", "coquiParallelWorkers": 4},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_rejects_worker_count_below_one(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/render",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"ttsProvider": "coqui", "coquiParallelWorkers": 0},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_rejects_non_integer_worker_count(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/render",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"ttsProvider": "coqui", "coquiParallelWorkers": "çok"},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def _wait_for_job(self, job_id: str) -> dict:
+        job = {}
+        for _ in range(50):
+            job = self.client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] in {"complete", "failed"}:
+                break
+            time.sleep(0.05)
+        return job
+
+    def test_accepts_worker_count_within_the_safety_ceiling(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("studio_web.api._render_in_isolated_process", return_value={}):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/render",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"ttsProvider": "coqui", "coquiParallelWorkers": 3},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("jobId", response.json())
+                self._wait_for_job(response.json()["jobId"])
+
+    def test_defaults_to_a_single_worker_when_not_specified(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("studio_web.api._render_in_isolated_process", return_value={}) as fake_render:
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/render",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"ttsProvider": "edge"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self._wait_for_job(response.json()["jobId"])
+                # _render_in_isolated_process(job_id, pdir, slides, provider_name, voice, rate, options)
+                options = fake_render.call_args[0][-1]
+                self.assertEqual(options.coqui_parallel_workers, 1)
 
 
 if __name__ == "__main__":

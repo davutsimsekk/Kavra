@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from 'react'
-import { Sun, Moon, Monitor, BookOpen, ChevronRight } from 'lucide-react'
+import { Sun, Moon, Monitor, ChevronRight } from 'lucide-react'
+import markUrl from './assets/kavra-mark.png'
 
 const Appearance = createContext(null)
 const THEME_KEY = 'ders-studio-appearance'
@@ -22,6 +23,9 @@ export function AppearanceProvider({ children }) {
   }, [theme])
   return <Appearance.Provider value={{ theme, setTheme }}>{children}</Appearance.Provider>
 }
+export function BrandMark({ size = 39 }) {
+  return <span className="brand-mark logo" style={{ '--mark': `${size}px` }}><img src={markUrl} alt="" draggable="false" /></span>
+}
 export function ThemeToggle() {
   const { theme, setTheme } = useContext(Appearance)
   return <div className="appearance-control" role="group" aria-label="Görünüm teması">
@@ -31,8 +35,8 @@ export function ThemeToggle() {
 }
 export function WorkspaceHeader({ onHome, projectName, onProject, current }) {
   return <header className="workspace-header">
-    <button className="workspace-brand" onClick={onHome} aria-label="Ders Stüdyosu · Projeler">
-      <span className="brand-mark"><BookOpen size={21} /></span><strong>Ders Stüdyosu<span>Öğrenmek için üret.</span></strong>
+    <button className="workspace-brand" onClick={onHome} aria-label="Kavra · Projeler">
+      <BrandMark size={40} /><strong>Kavra<span>Oku. Dinle. Kavra.</span></strong>
     </button>
     <nav className="breadcrumbs" aria-label="Konum">
       <button onClick={onHome}>Projeler</button>
