@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+/tts_server_token.txt
+/tts_server_address.txt
 
 # --- Python ---
 venv/
@@ -15,7 +17,18 @@ _cache/
 *.log
 
 # --- İndirilen TTS modelleri (60 MB+ binary, yeniden indirilebilir) ---
-models/
+# Model ağırlıklarını yok say; yalnız uygulamanın hazır Chatterbox referans
+# seslerini sürüm kontrolünde tut. Kullanıcıya ait olabilecek özel referanslar
+# ayrıca hariç bırakılır.
+models/*
+!models/chatterbox_speakers/
+models/chatterbox_speakers/*
+!models/chatterbox_speakers/*.wav
+/models/chatterbox_speakers/turkce_erkek_referans.wav
+
+# Yerel ses karşılaştırma çıktıları; çalışma zamanı bunları kullanmaz.
+/ses_ornekleri_erkek_xtts/
+/ses_ornekleri_kadin_xtts/
 
 # --- Kullanıcı verisi ve üretilen ders videoları ---
 projects/

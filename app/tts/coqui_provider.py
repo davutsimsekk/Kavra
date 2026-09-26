@@ -7,6 +7,74 @@ from app.tts.base import TTSProvider, local_engine_unavailable
 
 SPEAKERS_DIR = MODELS_DIR / "coqui_speakers"
 
+# XTTS v2'nin hazır konuşmacıları belirli bir dile bağlı değildir. Aşağıdaki
+# kısa liste, aynı Türkçe teknik cümleyle üretilip erkek ses adayı olarak
+# dinlemeye sunulan konuşmacılardır. Damien Black; düşük temel frekansı,
+# anlaşılır seviyesi ve ders anlatımına uygun daha tok tınısı nedeniyle ilk
+# öneri olarak gösterilir. Bu yalnızca arayüz sırasıdır; kullanıcı diğer
+# adayları veya kendi klonlanmış WAV dosyasını seçmeye devam edebilir.
+XTTS_RECOMMENDED_MALE_SPEAKER = "Damien Black"
+XTTS_RECOMMENDED_FEMALE_SPEAKER = "Claribel Dervla"
+XTTS_CURATED_MALE_SPEAKERS = (
+    "Damien Black",
+    "Luis Moray",
+    "Baldur Sanjin",
+    "Ilkin Urbano",
+    "Kumar Dahl",
+    "Ludvig Milivoj",
+    "Royston Min",
+    "Torcull Diarmuid",
+    "Viktor Eka",
+    "Craig Gutsy",
+    "Marcos Rudaski",
+    "Andrew Chipper",
+)
+XTTS_CURATED_FEMALE_SPEAKERS = (
+    "Claribel Dervla",
+    "Ana Florence",
+    "Tanja Adelina",
+    "Tammy Grit",
+    "Sofia Hellen",
+)
+
+
+def list_xtts_builtin_voices(available: list[str] | tuple[str, ...] | None = None) -> list[dict]:
+    """Modeli yüklemeden gösterilebilen, denenmiş erkek XTTS seslerini döndür.
+
+    ``available`` verilirse yalnız gerçekten yüklü checkpoint'te bulunan
+    konuşmacılar listelenir. Bu sayede statik web listesi hızlı kalırken model
+    yüklendiğindeki sağlayıcı listesi de checkpoint ile tutarlı olur.
+    """
+    allowed = set(available) if available is not None else None
+    voices = []
+    ordered = (
+        XTTS_RECOMMENDED_MALE_SPEAKER,
+        XTTS_RECOMMENDED_FEMALE_SPEAKER,
+        *(name for name in XTTS_CURATED_MALE_SPEAKERS if name != XTTS_RECOMMENDED_MALE_SPEAKER),
+        *(name for name in XTTS_CURATED_FEMALE_SPEAKERS if name != XTTS_RECOMMENDED_FEMALE_SPEAKER),
+    )
+    for name in ordered:
+        if allowed is not None and name not in allowed:
+            continue
+        if name == XTTS_RECOMMENDED_MALE_SPEAKER:
+            suffix = "önerilen · tok erkek · ders anlatımı"
+        elif name == XTTS_RECOMMENDED_FEMALE_SPEAKER:
+            suffix = "önerilen · sıcak kadın · ders anlatımı"
+        elif name in XTTS_CURATED_FEMALE_SPEAKERS:
+            suffix = "kadın ders sesi"
+        else:
+            suffix = "erkek aday"
+        voices.append({"id": f"builtin:{name}", "label": f"{name} (XTTS {suffix})"})
+
+    # Eski ayarlar ve API istemcileri için geriye dönük varsayılanı koruyoruz;
+    # ancak yeni seçimlerde önerilen erkek ses ilk sırada olduğundan arayüz onu
+    # otomatik seçer.
+    voices.insert(2 if len(voices) >= 2 else len(voices), {
+        "id": "builtin:default",
+        "label": "XTTS varsayılan konuşmacı (geriye dönük uyumluluk)",
+    })
+    return voices
+
 
 def _patch_xtts_audio_loading() -> None:
     """XTTS'in klonlanmış-ses referans dosyasını okumak için kullandığı
@@ -100,7 +168,7 @@ class CoquiTTSProvider(TTSProvider):
         self._cloned_speaker_ids: dict[str, str] = {}
 
     def list_voices(self) -> list[dict]:
-        voices = [{"id": "builtin:default", "label": "Varsayılan (XTTS dahili konuşmacı)"}]
+        voices = list_xtts_builtin_voices(self.tts.speakers or [])
         if SPEAKERS_DIR.exists():
             for wav in sorted(SPEAKERS_DIR.glob("*.wav")):
                 voices.append({"id": str(wav), "label": f"Klonlanmış: {wav.stem}"})
@@ -115,6 +183,12 @@ class CoquiTTSProvider(TTSProvider):
             if default is None:
                 raise RuntimeError("Kullanılabilir konuşmacı yok.")
             return default
+
+        if voice.startswith("builtin:"):
+            name = voice[len("builtin:"):]
+            if name not in (self.tts.speakers or []):
+                raise RuntimeError(f"'{name}' adında dahili bir XTTS konuşmacısı yok.")
+            return name
 
         speaker_id = self._cloned_speaker_ids.get(voice)
         if speaker_id is None:

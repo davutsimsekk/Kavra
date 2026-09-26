@@ -22,6 +22,42 @@ from app.tts.base import TTSProvider
 
 CHATTERBOX_SPEAKERS_DIR = MODELS_DIR / "chatterbox_speakers"
 MAX_CHARS_PER_GENERATION = 220
+CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM = "Damien_Black"
+CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM = "Claribel_Dervla"
+CHATTERBOX_FEMALE_REFERENCE_STEMS = {
+    "Claribel_Dervla",
+    "Ana_Florence",
+    "Tanja_Adelina",
+    "Tammy_Grit",
+    "Sofia_Hellen",
+}
+
+
+def list_chatterbox_voices() -> list[dict]:
+    """Klon referanslarını önerilen ders sesi önce gelecek şekilde listele."""
+    wavs = sorted(
+        CHATTERBOX_SPEAKERS_DIR.glob("*.wav"),
+        key=lambda wav: (
+            {
+                CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM: 0,
+                CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM: 1,
+            }.get(wav.stem, 2),
+            wav.stem.casefold(),
+        ),
+    )
+    voices = []
+    for wav in wavs:
+        display = wav.stem.replace("_", " ").title()
+        if wav.stem == CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM:
+            label = f"{display} (Chatterbox klon · önerilen erkek ders sesi)"
+        elif wav.stem == CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM:
+            label = f"{display} (Chatterbox klon · önerilen kadın ders sesi)"
+        elif wav.stem in CHATTERBOX_FEMALE_REFERENCE_STEMS:
+            label = f"{display} (Chatterbox klon · kadın ders sesi)"
+        else:
+            label = f"{display} (Chatterbox klon referansı)"
+        voices.append({"id": str(wav), "label": label})
+    return voices
 
 
 def _split_text(text: str, maximum: int = MAX_CHARS_PER_GENERATION) -> list[str]:
@@ -84,10 +120,7 @@ class ChatterboxTTSProvider(TTSProvider):
         self._model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
 
     def list_voices(self) -> list[dict]:
-        return [
-            {"id": str(wav), "label": f"Klon referansı: {wav.stem.replace('_', ' ').title()}"}
-            for wav in sorted(CHATTERBOX_SPEAKERS_DIR.glob("*.wav"))
-        ]
+        return list_chatterbox_voices()
 
     def synthesize(self, text: str, voice: str, out_path: Path, rate: str = "+0%") -> SynthResult:
         if not voice or voice == "builtin:default":

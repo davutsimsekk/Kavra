@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.tts.coqui_provider import CoquiTTSProvider
+from app.tts.coqui_provider import CoquiTTSProvider, list_xtts_builtin_voices
 
 
 def _make_fake_tts():
@@ -78,6 +78,34 @@ class AudioLoadingPatchTests(unittest.TestCase):
 
 
 class SpeakerResolutionTests(unittest.TestCase):
+    def test_static_voice_list_puts_recommended_male_voice_first(self):
+        voices = list_xtts_builtin_voices()
+
+        self.assertEqual(voices[0]["id"], "builtin:Damien Black")
+        self.assertIn("önerilen", voices[0]["label"])
+        self.assertEqual(voices[1]["id"], "builtin:Claribel Dervla")
+        self.assertIn("önerilen", voices[1]["label"])
+        self.assertIn("kadın", voices[1]["label"])
+        self.assertIn("builtin:default", [voice["id"] for voice in voices])
+
+    def test_provider_voice_list_filters_speakers_missing_from_checkpoint(self):
+        fake_tts = _make_fake_tts()
+        fake_tts.speakers = ["Claribel Dervla", "Damien Black", "Luis Moray"]
+        provider = _make_provider(fake_tts)
+
+        ids = [voice["id"] for voice in provider.list_voices()]
+        self.assertEqual(ids[0], "builtin:Damien Black")
+        self.assertIn("builtin:Luis Moray", ids)
+        self.assertIn("builtin:Claribel Dervla", ids)
+        self.assertNotIn("builtin:Baldur Sanjin", ids)
+
+    def test_curated_female_voices_are_labeled_for_lectures(self):
+        voices = {voice["id"]: voice["label"] for voice in list_xtts_builtin_voices()}
+
+        for name in ("Ana Florence", "Tanja Adelina", "Tammy Grit", "Sofia Hellen"):
+            self.assertIn(f"builtin:{name}", voices)
+            self.assertIn("kadın ders sesi", voices[f"builtin:{name}"])
+
     def test_builtin_default_uses_first_available_speaker(self):
         fake_tts = _make_fake_tts()
         provider = _make_provider(fake_tts)
@@ -89,6 +117,19 @@ class SpeakerResolutionTests(unittest.TestCase):
         provider = _make_provider(fake_tts)
 
         self.assertEqual(provider._resolve_speaker_id(""), "Claribel Dervla")
+
+    def test_named_builtin_voice_is_forwarded_to_xtts(self):
+        fake_tts = _make_fake_tts()
+        fake_tts.speakers = ["Claribel Dervla", "Damien Black"]
+        provider = _make_provider(fake_tts)
+
+        self.assertEqual(provider._resolve_speaker_id("builtin:Damien Black"), "Damien Black")
+
+    def test_unknown_named_builtin_voice_is_rejected(self):
+        provider = _make_provider(_make_fake_tts())
+
+        with self.assertRaisesRegex(RuntimeError, "dahili bir XTTS konuşmacısı yok"):
+            provider._resolve_speaker_id("builtin:Olmayan Ses")
 
     def test_cloned_voice_computes_conditioning_latents_once(self):
         fake_tts = _make_fake_tts()

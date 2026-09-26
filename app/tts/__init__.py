@@ -25,9 +25,9 @@ def get_provider(name: str, **kwargs) -> TTSProvider:
 def list_voices(name: str) -> list[dict]:
     """List voices without loading heavyweight synthesis models when possible."""
     if name == "coqui":
-        from app.tts.coqui_provider import SPEAKERS_DIR
+        from app.tts.coqui_provider import SPEAKERS_DIR, list_xtts_builtin_voices
 
-        voices = [{"id": "builtin:default", "label": "Varsayılan (XTTS dahili konuşmacı)"}]
+        voices = list_xtts_builtin_voices()
         if SPEAKERS_DIR.exists():
             voices.extend(
                 {"id": str(wav), "label": f"Klonlanmış: {wav.stem}"}
@@ -46,12 +46,9 @@ def list_voices(name: str) -> list[dict]:
             )
         return voices
     if name == "chatterbox":
-        from app.tts.chatterbox_provider import CHATTERBOX_SPEAKERS_DIR
+        from app.tts.chatterbox_provider import list_chatterbox_voices
 
-        return [
-            {"id": str(wav), "label": f"Klon referansı: {wav.stem.replace('_', ' ').title()}"}
-            for wav in sorted(CHATTERBOX_SPEAKERS_DIR.glob("*.wav"))
-        ]
+        return list_chatterbox_voices()
     return get_provider(name).list_voices()
 
 
