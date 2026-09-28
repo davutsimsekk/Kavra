@@ -1,11 +1,17 @@
 import subprocess
 from pathlib import Path
 
-from app.config import MODELS_DIR
+from app.config import MODELS_DIR, VOICE_REFERENCES_DIR
 from app.models import SynthResult
 from app.tts.base import TTSProvider, local_engine_unavailable
 
 SPEAKERS_DIR = MODELS_DIR / "coqui_speakers"
+XTTS_TEMPERATURE = 0.75
+XTTS_REPETITION_PENALTY = 10.0
+XTTS_TOP_K = 50
+XTTS_TOP_P = 0.85
+XTTS_SPEED = 1.0
+_DOGA_REFERENCE_STEM = "Doga_Upbeat_Rich"
 
 # XTTS v2'nin hazır konuşmacıları belirli bir dile bağlı değildir. Aşağıdaki
 # kısa liste, aynı Türkçe teknik cümleyle üretilip erkek ses adayı olarak
@@ -36,6 +42,27 @@ XTTS_CURATED_FEMALE_SPEAKERS = (
     "Tammy Grit",
     "Sofia Hellen",
 )
+
+
+def list_xtts_reference_voices() -> list[dict]:
+    """Ortak ve XTTS'e özel klon referanslarını, Doğa önce olacak şekilde döndür."""
+    paths: dict[str, Path] = {}
+    for directory in (VOICE_REFERENCES_DIR, SPEAKERS_DIR):
+        if directory.exists():
+            for wav in directory.glob("*.wav"):
+                paths[str(wav.resolve()).casefold()] = wav
+    ordered = sorted(paths.values(), key=lambda wav: (wav.stem != _DOGA_REFERENCE_STEM, wav.stem.casefold()))
+    return [
+        {
+            "id": str(wav),
+            "label": (
+                "Doğa — upbeat & rich (XTTS klon · varsayılan)"
+                if wav.stem == _DOGA_REFERENCE_STEM
+                else f"Klonlanmış: {wav.stem.replace('_', ' ')}"
+            ),
+        }
+        for wav in ordered
+    ]
 
 
 def list_xtts_builtin_voices(available: list[str] | tuple[str, ...] | None = None) -> list[dict]:
@@ -168,11 +195,7 @@ class CoquiTTSProvider(TTSProvider):
         self._cloned_speaker_ids: dict[str, str] = {}
 
     def list_voices(self) -> list[dict]:
-        voices = list_xtts_builtin_voices(self.tts.speakers or [])
-        if SPEAKERS_DIR.exists():
-            for wav in sorted(SPEAKERS_DIR.glob("*.wav")):
-                voices.append({"id": str(wav), "label": f"Klonlanmış: {wav.stem}"})
-        return voices
+        return list_xtts_reference_voices() + list_xtts_builtin_voices(self.tts.speakers or [])
 
     def _resolve_speaker_id(self, voice: str) -> str:
         """Bu ses için model.speaker_manager.speakers içinde bir giriş bulunmasını
@@ -203,7 +226,21 @@ class CoquiTTSProvider(TTSProvider):
         return speaker_id
 
     def synthesize(self, text: str, voice: str, out_path: Path, rate: str = "+0%") -> SynthResult:
-        kwargs = dict(text=text, language="tr", file_path=str(out_path), speaker=self._resolve_speaker_id(voice))
+        # Bunlar Doğa karşılaştırmasında eksiksiz cümle üretimi ve canlılık açısından
+        # iyi sonuç veren XTTS v2 ayarlarıdır. Temperature değerlerinin modelden modele
+        # anlamı değiştiği için Chatterbox'ın 0.85 değerini burada kopyalamıyoruz.
+        kwargs = dict(
+            text=text,
+            language="tr",
+            file_path=str(out_path),
+            speaker=self._resolve_speaker_id(voice),
+            temperature=XTTS_TEMPERATURE,
+            repetition_penalty=XTTS_REPETITION_PENALTY,
+            top_k=XTTS_TOP_K,
+            top_p=XTTS_TOP_P,
+            speed=XTTS_SPEED,
+            split_sentences=True,
+        )
         self.tts.tts_to_file(**kwargs)
 
         result = subprocess.run(

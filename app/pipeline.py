@@ -187,7 +187,8 @@ def _slide_hash(slide: Slide, tts_provider: str, voice: str, rate: str, opts: Vi
     payload = json.dumps(_renderable_signature(slide), ensure_ascii=False, sort_keys=True) + \
         f"|{tts_provider}|{voice}|{rate}|{opts.width}x{opts.height}@{opts.fps}" \
         f"|sub={opts.subtitles}|fade={opts.fade_transitions}|kb={opts.ken_burns}" \
-        f"|theme={opts.theme_preset}|accent={opts.accent_rgb}|reveal={opts.bullet_reveal}"
+        f"|theme={opts.theme_preset}|accent={opts.accent_rgb}|reveal={opts.bullet_reveal}" \
+        f"|quality={opts.quality_preset}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 

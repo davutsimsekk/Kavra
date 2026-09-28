@@ -15,7 +15,10 @@ from studio_web.api import (
 class LightweightVoiceTests(unittest.TestCase):
     @patch("app.tts.get_provider")
     def test_listing_coqui_voices_does_not_construct_model(self, get_provider):
-        voices = list_voices("coqui")
+        # Makineye özel ortak klon referansları (ör. Doğa) bu testin konusu
+        # değil; listelemenin ağır XTTS modelini kurmaması burada doğrulanan şey.
+        with patch("app.tts.coqui_provider.list_xtts_reference_voices", return_value=[]):
+            voices = list_voices("coqui")
         get_provider.assert_not_called()
         self.assertEqual(voices[0]["id"], "builtin:Damien Black")
         self.assertIn("önerilen", voices[0]["label"])

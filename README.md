@@ -84,7 +84,7 @@ kurmana gerek yok, Edge-TTS ve Piper zaten çekirdek kurulumla çalışır.
 | **elevenlabs** | En doğal | Bulut, API key gerekir | Ücretsiz kota sınırlı |
 | **coqui** (XTTS v2) | Yüksek, ses klonlama | Offline (ilk indirme hariç) | GPU önerilir; CPML lisansı — ticari kullanım ayrı lisans ister |
 | **anka** | Yüksek, Türkçe'ye özel eğitildi | Offline (ilk indirme hariç) | XTTS'ten hızlı; CC-BY-NC-4.0 — yalnızca kişisel/araştırma |
-| **chatterbox** | Yüksek, ses klonlama, çok dilli | Offline (ayrı ortam) | GPU gerekir, ayrı bir Python ortamında çalışır |
+| **chatterbox** | Yüksek, ses klonlama, çok dilli | Offline (ayrı ortam) | Multilingual V3; GPU gerekir, ayrı bir Python ortamında çalışır |
 
 XTTS v2 ve Piper, GPU'suz bir sunucudan uzak bir GPU'ya (kendi bilgisayarın veya Colab) devredilebilir —
 bkz. [REMOTE_TTS.md](REMOTE_TTS.md). Lisans notları özet niyetinedir; ticari kullanım öncesi ilgili
@@ -96,7 +96,10 @@ lisansı kendin doğrula.
   Sıcak Kağıt, Mint Akademik, Aurora) ve içeriğe göre otomatik tema seçimi
 - Kod blokları Pygments ile sözdizimi renklendirmeli
 - Konuşmayla senkronize gömülü altyazı (Edge-TTS'te kelime bazlı, diğerlerinde tahmini)
-- Yumuşak geçişler, isteğe bağlı Ken Burns efekti
+- 1080p/30 fps çıktı; Yüksek, Dengeli ve Taslak kodlama profilleri
+- BT.709 renk etiketleri, Lanczos ölçekleme ve metin/ince çizgilere göre ayarlanmış H.264 sıkıştırma
+- Slaytlar arasında dengeli konuşma seviyesi; ilk/son kelimeyi zayıflatmayan ses geçişleri
+- Yumuşak görsel geçişler, merkezlenmiş ve daha pürüzsüz isteğe bağlı Ken Burns efekti
 - Slayt/ses/segment hash tabanlı önbellek: değişmeyen slaytlar yeniden render edilmez
 - İptal edilebilir render; uygulama yeniden başlasa da kaldığı yerden devam eder
 

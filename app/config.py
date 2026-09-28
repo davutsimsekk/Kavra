@@ -31,13 +31,14 @@ def _configured_path(name: str, default: Path) -> Path:
 DATA_DIR = _configured_path("KAVRA_DATA_DIR", ROOT)
 CACHE_DIR = _configured_path("KAVRA_CACHE_DIR", DATA_DIR / "_cache")
 MODELS_DIR = _configured_path("KAVRA_MODELS_DIR", DATA_DIR / "models")
+VOICE_REFERENCES_DIR = MODELS_DIR / "voice_references"
 PROJECTS_DIR = _configured_path("KAVRA_PROJECTS_DIR", DATA_DIR / "projects")
 STUDY_DATA_DIR = _configured_path("KAVRA_STUDY_DATA_DIR", DATA_DIR / "study_data")
 PROMPTS_DIR = ROOT / "prompts"
 ENV_PATH = _configured_path("KAVRA_ENV_PATH", DATA_DIR / ".env")
 SETTINGS_PATH = _configured_path("KAVRA_SETTINGS_PATH", DATA_DIR / "settings.json")
 
-for d in (DATA_DIR, CACHE_DIR, MODELS_DIR, PROJECTS_DIR, STUDY_DATA_DIR, PROMPTS_DIR):
+for d in (DATA_DIR, CACHE_DIR, MODELS_DIR, VOICE_REFERENCES_DIR, PROJECTS_DIR, STUDY_DATA_DIR, PROMPTS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 os.environ.setdefault("TEMP", str(CACHE_DIR / "tmp"))
@@ -107,7 +108,11 @@ def delete_api_key(name: str):
 class VideoOptions:
     width: int = 1920
     height: int = 1080
-    fps: int = 25
+    fps: int = 30
+    # "high" metin ve ince çizgileri korumaya odaklanır; "balanced" daha hızlı,
+    # "fast" ise taslak render içindir. Encoder ayrıntıları video_builder'da tek
+    # yerde tutulur ve bu değer segment cache anahtarına da girer.
+    quality_preset: str = "high"
     subtitles: bool = True
     fade_transitions: bool = True
     ken_burns: bool = False
@@ -145,6 +150,9 @@ class VideoOptions:
 # paylaşır, aksi halde ikisi birbirinden sapan tahminler verir.
 WORDS_PER_MINUTE = 132
 
+DEFAULT_DOGA_REFERENCE = VOICE_REFERENCES_DIR / "Doga_Upbeat_Rich.wav"
+_DOGA_IS_AVAILABLE = DEFAULT_DOGA_REFERENCE.is_file()
+
 
 DEFAULT_SETTINGS = {
     "last_source": "",
@@ -157,13 +165,17 @@ DEFAULT_SETTINGS = {
     "agent_reuse_session": True,
     "agent_max_sections": 4,
     "agent_timeout_sec": 900,
-    "tts_provider": "edge",
-    "tts_voice": "tr-TR-AhmetNeural",
+    # Doğa referansı yerel kurulumda mevcutsa aynı dosya hem Chatterbox hem de
+    # XTTS v2 tarafından kullanılabilir. Dosya taşınabilir kurulumda yoksa web
+    # arayüzü sağlayıcının ilk kullanılabilir sesine güvenle düşer.
+    "tts_provider": "chatterbox" if _DOGA_IS_AVAILABLE else "edge",
+    "tts_voice": str(DEFAULT_DOGA_REFERENCE) if _DOGA_IS_AVAILABLE else "tr-TR-AhmetNeural",
     "tts_rate": "+0%",
     "subtitles": True,
     "fade_transitions": True,
     "ken_burns": False,
     "bullet_reveal": False,
+    "video_quality_preset": "high",
     "theme_preset": "auto",
     "narration_style": "normal",
     "coqui_parallel_workers": 1,

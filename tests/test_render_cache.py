@@ -103,6 +103,15 @@ class SlideHashIgnoresMetadataFieldsTests(unittest.TestCase):
             _slide_hash(b, "edge", "v", "+0%", opts),
         )
 
+    def test_hash_changes_when_video_quality_profile_changes(self):
+        slide = Slide(title="Aynı slayt", narration="Aynı anlatım")
+        high = VideoOptions(quality_preset="high")
+        fast = VideoOptions(quality_preset="fast")
+        self.assertNotEqual(
+            _slide_hash(slide, "edge", "v", "+0%", high),
+            _slide_hash(slide, "edge", "v", "+0%", fast),
+        )
+
 
 class WordCacheRoundTripTests(unittest.TestCase):
     def test_round_trips_word_timings_through_disk(self):

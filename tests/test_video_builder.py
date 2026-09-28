@@ -58,6 +58,13 @@ class PickEncoderCachingTests(unittest.TestCase):
             self.assertEqual(vb.pick_video_encoder(), ("libx264", vb._X264_ARGS))
             probe.assert_not_called()
 
+    def test_quality_profile_selects_matching_encoder_arguments(self):
+        with patch.object(vb, "_encoder_cache", "libx264"):
+            encoder, args = vb.pick_video_encoder("fast")
+        self.assertEqual(encoder, "libx264")
+        self.assertIn("veryfast", args)
+        self.assertIn("23", args)
+
 
 class BuildSegmentFallbackTests(unittest.TestCase):
     """build_segment'ın gerçek ffmpeg çağırdığı kısmı burada mock'lanır; gerçek encode
@@ -105,6 +112,28 @@ class BuildSegmentFallbackTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 vb.build_segment(self.image, self.audio, 2.0, self.out, VideoOptions())
         self.assertEqual(run.call_count, 1)
+
+    def test_high_quality_command_normalizes_audio_and_marks_bt709(self):
+        ok = MagicMock(returncode=0)
+        with patch.object(vb, "_encoder_cache", "libx264"), \
+             patch.object(vb.subprocess, "run", return_value=ok) as run:
+            vb.build_segment(self.image, self.audio, 2.0, self.out, VideoOptions(quality_preset="high"))
+        cmd = run.call_args[0][0]
+        self.assertIn(vb._NARRATION_AUDIO_FILTER, cmd)
+        self.assertNotIn("afade", " ".join(cmd))
+        self.assertIn("bt709", cmd)
+        self.assertIn("+faststart", cmd)
+        self.assertIn("slow", cmd)
+        self.assertIn("lanczos", cmd[cmd.index("-vf") + 1])
+
+    def test_ken_burns_is_centered_and_uses_high_resolution_source(self):
+        ok = MagicMock(returncode=0)
+        with patch.object(vb, "_encoder_cache", "libx264"), \
+             patch.object(vb.subprocess, "run", return_value=ok) as run:
+            vb.build_segment(self.image, self.audio, 2.0, self.out, VideoOptions(ken_burns=True))
+        vf = run.call_args[0][0][run.call_args[0][0].index("-vf") + 1]
+        self.assertIn("scale=3840:2160:flags=lanczos", vf)
+        self.assertIn("iw/2-(iw/zoom/2)", vf)
 
 
 class BuildSegmentRevealTests(unittest.TestCase):

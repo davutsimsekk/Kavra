@@ -92,6 +92,7 @@ from studio_web.remote_tts_routes import remote_tts_state
 
 MAX_REMOTE_TTS_CONCURRENCY = 4
 from app.video.slide_renderer import render_slide
+from app.video.video_builder import QUALITY_PRESETS
 from app.video.themes import THEME_LABELS
 from studio_web import access
 from studio_web.batch_queue import BatchQueueStore
@@ -1245,11 +1246,15 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
             remote_tts_check_connection(RemoteTTSConfig.load())
         except RemoteTTSError as exc:
             raise HTTPException(400, str(exc)) from exc
+    quality_preset = str(payload.get("qualityPreset", "high"))
+    if quality_preset not in QUALITY_PRESETS:
+        raise HTTPException(400, "Video kalite profili high, balanced veya fast olmalı.")
     options = VideoOptions(
         subtitles=bool(payload.get("subtitles", True)),
         fade_transitions=bool(payload.get("fadeTransitions", True)),
         ken_burns=bool(payload.get("kenBurns", False)),
         bullet_reveal=bool(payload.get("bulletReveal", False)),
+        quality_preset=quality_preset,
         theme_preset=str(payload.get("theme", "auto")),
         coqui_parallel_workers=coqui_parallel_workers,
         chatterbox_parallel_workers=chatterbox_parallel_workers,
@@ -1265,6 +1270,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         "fade_transitions": options.fade_transitions,
         "ken_burns": options.ken_burns,
         "bullet_reveal": options.bullet_reveal,
+        "video_quality_preset": options.quality_preset,
         "theme_preset": options.theme_preset,
         "coqui_parallel_workers": options.coqui_parallel_workers,
         "chatterbox_parallel_workers": options.chatterbox_parallel_workers,
@@ -1281,7 +1287,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         )
 
     course_projects.save_video_settings(pdir, "videoSettings", payload,
-        ("theme", "ttsProvider", "voice", "rate", "subtitles", "fadeTransitions", "kenBurns", "coquiParallelWorkers", "chatterboxParallelWorkers", "ttsBackend", "remoteTtsConcurrency"))
+        ("theme", "ttsProvider", "voice", "rate", "subtitles", "fadeTransitions", "kenBurns", "bulletReveal", "qualityPreset", "coquiParallelWorkers", "chatterboxParallelWorkers", "ttsBackend", "remoteTtsConcurrency"))
     job_id = jobs.create(
         "video",
         work,

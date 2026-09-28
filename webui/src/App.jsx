@@ -259,6 +259,7 @@ export default function App() {
   const [video, setVideo] = useState({
     theme: 'auto', ttsProvider: 'edge', voice: 'tr-TR-AhmetNeural', rate: '+0%',
     subtitles: true, fadeTransitions: true, kenBurns: false, bulletReveal: false, elevenlabsKey: '',
+    qualityPreset: 'high',
     coquiParallelWorkers: 1,
     chatterboxParallelWorkers: 1,
     ttsBackend: 'local', remoteTtsConcurrency: 2,
@@ -292,6 +293,7 @@ export default function App() {
           fadeTransitions: s.fade_transitions,
           kenBurns: s.ken_burns,
           bulletReveal: s.bullet_reveal || false,
+          qualityPreset: s.video_quality_preset || 'high',
           coquiParallelWorkers: s.coqui_parallel_workers || 1,
           chatterboxParallelWorkers: s.chatterbox_parallel_workers || 1,
           ttsBackend: s.tts_backend || 'local',
@@ -595,6 +597,7 @@ export default function App() {
             elevenlabsKey: video.elevenlabsKey, subtitles: video.subtitles,
             fadeTransitions: video.fadeTransitions, kenBurns: video.kenBurns,
             bulletReveal: video.bulletReveal, theme: video.theme,
+            qualityPreset: video.qualityPreset,
             coquiParallelWorkers: video.coquiParallelWorkers,
             chatterboxParallelWorkers: video.chatterboxParallelWorkers,
           },
@@ -1545,7 +1548,7 @@ export default function App() {
         <div className="panel-toolbar"><div><span className="kicker">CANVAS</span><h3>Slayt önizleme</h3></div><button className="button compact" onClick={preview} disabled={!project}><RefreshCw size={15} /> Yenile</button></div>
         <div className="preview-canvas">
           {previewUrl ? <img src={previewUrl} alt="Video slaytı önizlemesi" /> : <div className="preview-placeholder"><MonitorPlay size={38} /><span>Temayı seçip önizlemeyi oluştur</span></div>}
-          <span className="resolution-badge">1920 × 1080</span>
+          <span className="resolution-badge">1920 × 1080 · 30 fps</span>
         </div>
         {project?.outputs?.video && <video className="result-video" controls src={`${apiBase}/output/video`} />}
       </section>
@@ -1588,6 +1591,11 @@ export default function App() {
           </small>
         </div>}
         <div className="editor-form">
+          <label className="field"><span>Video kalitesi</span><select value={video.qualityPreset} onChange={(e) => setVideo({ ...video, qualityPreset: e.target.value })}>
+            <option value="high">Yüksek — en net yazı ve çizgiler</option>
+            <option value="balanced">Dengeli — daha hızlı render</option>
+            <option value="fast">Taslak — en hızlı</option>
+          </select><small>Yüksek profil 30 fps, daha güçlü sıkıştırma kalitesi ve net slayt ayrıntıları kullanır.</small></label>
           <label className="field"><span>Sağlayıcı</span><select value={video.ttsProvider} onChange={(e) => setVideo({ ...video, ttsProvider: e.target.value })}>{bootstrap.ttsProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.id} — {provider.label.split('(')[0]}</option>)}</select></label>
           <label className="field"><span>Ses</span><select value={video.voice} onChange={(e) => setVideo({ ...video, voice: e.target.value })}>{voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label}</option>)}</select></label>
           <label className="field"><span>Konuşma hızı</span><select value={video.rate} onChange={(e) => setVideo({ ...video, rate: e.target.value })}>{['-20%', '-10%', '+0%', '+10%', '+20%'].map((rate) => <option key={rate}>{rate}</option>)}</select></label>

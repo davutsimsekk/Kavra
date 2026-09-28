@@ -1195,6 +1195,29 @@ class RenderCoquiParallelWorkersValidationTests(unittest.TestCase):
                 # _render_in_isolated_process(job_id, pdir, slides, provider_name, voice, rate, options)
                 options = fake_render.call_args[0][-1]
                 self.assertEqual(options.coqui_parallel_workers, 1)
+                self.assertEqual(options.quality_preset, "high")
+
+    def test_rejects_unknown_video_quality_profile(self):
+        with _temp_project([self._slide()]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/render",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={"ttsProvider": "edge", "qualityPreset": "ultra-ish"},
+            )
+            self.assertEqual(response.status_code, 400)
+
+    def test_selected_video_quality_profile_reaches_render_worker(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("studio_web.api._render_in_isolated_process", return_value={}) as fake_render:
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/render",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"ttsProvider": "edge", "qualityPreset": "balanced"},
+                )
+                self.assertEqual(response.status_code, 200)
+                self._wait_for_job(response.json()["jobId"])
+                options = fake_render.call_args[0][-1]
+                self.assertEqual(options.quality_preset, "balanced")
 
 
 class VisionNarrateEndpointTests(unittest.TestCase):

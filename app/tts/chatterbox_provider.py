@@ -16,19 +16,22 @@ from pathlib import Path
 
 import numpy as np
 
-from app.config import MODELS_DIR
+from app.config import MODELS_DIR, VOICE_REFERENCES_DIR
 from app.models import SynthResult
 from app.tts.base import TTSProvider
 
 
 CHATTERBOX_SPEAKERS_DIR = MODELS_DIR / "chatterbox_speakers"
 MAX_CHARS_PER_GENERATION = 220
+MAX_COMPLETENESS_ATTEMPTS = 3
+MAX_PLAUSIBLE_WORDS_PER_SECOND = 5.2
 CHATTERBOX_T3_MODEL = "v3"
 CHATTERBOX_TEMPERATURE = 0.85
 CHATTERBOX_EXAGGERATION = 0.80
 CHATTERBOX_CFG_WEIGHT = 0.30
 CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM = "Damien_Black"
 CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM = "Claribel_Dervla"
+CHATTERBOX_DEFAULT_REFERENCE_STEM = "Doga_Upbeat_Rich"
 CHATTERBOX_FEMALE_REFERENCE_STEMS = {
     "Claribel_Dervla",
     "Ana_Florence",
@@ -40,20 +43,28 @@ CHATTERBOX_FEMALE_REFERENCE_STEMS = {
 
 def list_chatterbox_voices() -> list[dict]:
     """Klon referanslarını önerilen ders sesi önce gelecek şekilde listele."""
+    unique: dict[str, Path] = {}
+    for directory in (VOICE_REFERENCES_DIR, CHATTERBOX_SPEAKERS_DIR):
+        if directory.exists():
+            for wav in directory.glob("*.wav"):
+                unique[str(wav.resolve()).casefold()] = wav
     wavs = sorted(
-        CHATTERBOX_SPEAKERS_DIR.glob("*.wav"),
+        unique.values(),
         key=lambda wav: (
             {
-                CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM: 0,
-                CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM: 1,
-            }.get(wav.stem, 2),
+                CHATTERBOX_DEFAULT_REFERENCE_STEM: 0,
+                CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM: 1,
+                CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM: 2,
+            }.get(wav.stem, 3),
             wav.stem.casefold(),
         ),
     )
     voices = []
     for wav in wavs:
         display = wav.stem.replace("_", " ").title()
-        if wav.stem == CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM:
+        if wav.stem == CHATTERBOX_DEFAULT_REFERENCE_STEM:
+            label = "Doğa — upbeat & rich (Chatterbox V3 · varsayılan)"
+        elif wav.stem == CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM:
             label = f"{display} (Chatterbox klon · önerilen erkek ders sesi)"
         elif wav.stem == CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM:
             label = f"{display} (Chatterbox klon · önerilen kadın ders sesi)"
@@ -66,13 +77,17 @@ def list_chatterbox_voices() -> list[dict]:
 
 
 def _split_text(text: str, maximum: int = MAX_CHARS_PER_GENERATION) -> list[str]:
-    """Uzun anlatımı Chatterbox'ın güvenli bağlam parçalarına ayırır."""
+    """Anlatımı cümle sınırlarını koruyan güvenli Chatterbox parçalarına ayırır.
+
+    Bir üretim çağrısında birden fazla cümle tutmak modelin aradaki/sondaki bir
+    cümleyi atlamasını tespit etmeyi zorlaştırır. Bu yüzden normal cümleler
+    birleştirilmez; yalnız maximum'u aşan tek bir cümle sözcük sınırından bölünür.
+    """
     clean = " ".join(text.split())
     if not clean:
         return []
     sentences = re.split(r"(?<=[.!?…])\s+", clean)
     parts: list[str] = []
-    current = ""
     for sentence in sentences:
         if len(sentence) > maximum:
             words = sentence.split()
@@ -89,16 +104,14 @@ def _split_text(text: str, maximum: int = MAX_CHARS_PER_GENERATION) -> list[str]
                 fragments.append(fragment)
         else:
             fragments = [sentence]
-        for fragment in fragments:
-            candidate = f"{current} {fragment}".strip()
-            if current and len(candidate) > maximum:
-                parts.append(current)
-                current = fragment
-            else:
-                current = candidate
-    if current:
-        parts.append(current)
+        parts.extend(fragment for fragment in fragments if fragment)
     return parts
+
+
+def _minimum_plausible_duration(text: str) -> float:
+    """Tam bir Türkçe cümle için çok ihtiyatlı alt süre sınırı (saniye)."""
+    word_count = len(re.findall(r"\S+", text))
+    return max(0.55, word_count / MAX_PLAUSIBLE_WORDS_PER_SECOND)
 
 class ChatterboxTTSProvider(TTSProvider):
     """Türkçe destekli Chatterbox Multilingual ile zero-shot ses klonlama."""
@@ -153,23 +166,34 @@ class ChatterboxTTSProvider(TTSProvider):
         clips = []
         for part in _split_text(text):
             # Uzun bir slaytı tek üretimde vermek KV cache'in 8 GB VRAM'i
-            # doldurmasına neden olur. Her cümle grubu bittikten sonra yalnızca
-            # model belleği korunur; geçici üretim belleği GPU'dan bırakılır.
-            with self._torch.inference_mode():
-                wav = self._model.generate(
-                    part,
-                    language_id="tr",
-                    temperature=CHATTERBOX_TEMPERATURE,
-                    exaggeration=CHATTERBOX_EXAGGERATION,
-                    cfg_weight=CHATTERBOX_CFG_WEIGHT,
-                )
-            clips.append(wav.squeeze(0).detach().cpu().numpy())
-            del wav
+            # doldurmasına ve modelin bir cümleyi atlamasına neden olabilir.
+            # Şüpheli derecede kısa bir sonuçta farklı örnekleme akışıyla yeniden
+            # dene; tüm denemeler kısa kalırsa sesi kaybetmek yerine en uzunu kullan.
+            best_clip = None
+            minimum_duration = _minimum_plausible_duration(part)
+            for _attempt in range(MAX_COMPLETENESS_ATTEMPTS):
+                with self._torch.inference_mode():
+                    wav = self._model.generate(
+                        part,
+                        language_id="tr",
+                        temperature=CHATTERBOX_TEMPERATURE,
+                        exaggeration=CHATTERBOX_EXAGGERATION,
+                        cfg_weight=CHATTERBOX_CFG_WEIGHT,
+                    )
+                clip = wav.squeeze(0).detach().cpu().numpy()
+                del wav
+                if best_clip is None or clip.size > best_clip.size:
+                    best_clip = clip
+                if clip.size / self._model.sr >= minimum_duration:
+                    break
+                if self.device.startswith("cuda"):
+                    self._torch.cuda.empty_cache()
+            clips.append(best_clip)
             if self.device.startswith("cuda"):
                 self._torch.cuda.empty_cache()
         if not clips:
             raise ValueError("Seslendirilecek metin boş.")
-        pause = np.zeros(int(self._model.sr * 0.12), dtype=clips[0].dtype)
+        pause = np.zeros(int(self._model.sr * 0.18), dtype=clips[0].dtype)
         stitched = []
         for clip in clips:
             stitched.extend((clip, pause))

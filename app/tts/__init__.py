@@ -25,15 +25,9 @@ def get_provider(name: str, **kwargs) -> TTSProvider:
 def list_voices(name: str) -> list[dict]:
     """List voices without loading heavyweight synthesis models when possible."""
     if name == "coqui":
-        from app.tts.coqui_provider import SPEAKERS_DIR, list_xtts_builtin_voices
+        from app.tts.coqui_provider import list_xtts_builtin_voices, list_xtts_reference_voices
 
-        voices = list_xtts_builtin_voices()
-        if SPEAKERS_DIR.exists():
-            voices.extend(
-                {"id": str(wav), "label": f"Klonlanmış: {wav.stem}"}
-                for wav in sorted(SPEAKERS_DIR.glob("*.wav"))
-            )
-        return voices
+        return list_xtts_reference_voices() + list_xtts_builtin_voices()
     if name == "anka":
         from app.tts.anka_provider import ANKA_SPEAKERS_DIR
 
@@ -58,5 +52,5 @@ PROVIDER_LABELS = {
     "elevenlabs": "ElevenLabs (bulut, en doğal, ücretli/sınırlı ücretsiz kota)",
     "coqui": "Coqui XTTS v2 (offline, ses klonlama, ağır kurulum)",
     "anka": "Anka TTS (offline, Türkçe'ye özel eğitildi, XTTS'ten ~2.3x hızlı, kişisel kullanım lisansı)",
-    "chatterbox": "Chatterbox Multilingual (offline, Türkçe ses klonlama, GPU)",
+    "chatterbox": "Chatterbox Multilingual V3 (offline, Türkçe ses klonlama, GPU)",
 }

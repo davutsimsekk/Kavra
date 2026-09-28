@@ -13,7 +13,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.tts.coqui_provider import CoquiTTSProvider, list_xtts_builtin_voices
+from app.tts.coqui_provider import (
+    CoquiTTSProvider,
+    XTTS_REPETITION_PENALTY,
+    XTTS_TEMPERATURE,
+    XTTS_TOP_K,
+    XTTS_TOP_P,
+    list_xtts_builtin_voices,
+    list_xtts_reference_voices,
+)
 
 
 def _make_fake_tts():
@@ -93,11 +101,29 @@ class SpeakerResolutionTests(unittest.TestCase):
         fake_tts.speakers = ["Claribel Dervla", "Damien Black", "Luis Moray"]
         provider = _make_provider(fake_tts)
 
-        ids = [voice["id"] for voice in provider.list_voices()]
+        with patch("app.tts.coqui_provider.VOICE_REFERENCES_DIR", Path("missing-shared")), \
+             patch("app.tts.coqui_provider.SPEAKERS_DIR", Path("missing-specific")):
+            ids = [voice["id"] for voice in provider.list_voices()]
         self.assertEqual(ids[0], "builtin:Damien Black")
         self.assertIn("builtin:Luis Moray", ids)
         self.assertIn("builtin:Claribel Dervla", ids)
         self.assertNotIn("builtin:Baldur Sanjin", ids)
+
+    def test_shared_doga_reference_is_listed_first_for_xtts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared = Path(tmp) / "shared"
+            specific = Path(tmp) / "specific"
+            shared.mkdir()
+            specific.mkdir()
+            doga = shared / "Doga_Upbeat_Rich.wav"
+            doga.write_bytes(b"RIFF")
+            (specific / "zeynep.wav").write_bytes(b"RIFF")
+            with patch("app.tts.coqui_provider.VOICE_REFERENCES_DIR", shared), \
+                 patch("app.tts.coqui_provider.SPEAKERS_DIR", specific):
+                voices = list_xtts_reference_voices()
+
+        self.assertEqual(Path(voices[0]["id"]).name, doga.name)
+        self.assertIn("varsayılan", voices[0]["label"])
 
     def test_curated_female_voices_are_labeled_for_lectures(self):
         voices = {voice["id"]: voice["label"] for voice in list_xtts_builtin_voices()}
@@ -183,6 +209,11 @@ class SynthesizeTests(unittest.TestCase):
         self.assertEqual(called_kwargs["speaker"], "Claribel Dervla")
         self.assertEqual(called_kwargs["language"], "tr")
         self.assertEqual(called_kwargs["text"], "merhaba dünya")
+        self.assertEqual(called_kwargs["temperature"], XTTS_TEMPERATURE)
+        self.assertEqual(called_kwargs["repetition_penalty"], XTTS_REPETITION_PENALTY)
+        self.assertEqual(called_kwargs["top_k"], XTTS_TOP_K)
+        self.assertEqual(called_kwargs["top_p"], XTTS_TOP_P)
+        self.assertTrue(called_kwargs["split_sentences"])
         self.assertEqual(result.duration, 12.5)
         self.assertIsNone(result.words)
 

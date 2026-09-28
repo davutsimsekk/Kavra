@@ -4,11 +4,34 @@ from pathlib import Path
 
 from app.config import VideoOptions
 
-# NVENC (h264_nvenc) ile ölçülen gerçek CQ 34, statik slayt + altyazı + Ken Burns
-# senaryosunda mevcut libx264 stillimage çıktısına görsel olarak eşdeğer (yan yana karşılaştırıldı)
-# ve dosya boyutu benzer/daha küçük çıkıyor (bkz. commit notu / KAVRA_PROJECT_HANDOFF.md).
-_NVENC_ARGS = ["-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "34", "-b:v", "0"]
-_X264_ARGS = ["-tune", "stillimage"]
+# İnce yazı ve diyagram çizgileri, sıradan kamera görüntüsüne göre sıkıştırma
+# artefaktlarını çok daha görünür kılar. Bu yüzden varsayılan profil özellikle
+# slayt videosuna göre ayarlandı. Kullanıcı isterse arayüzden balanced/fast
+# seçerek render süresini azaltabilir.
+QUALITY_PRESETS = ("high", "balanced", "fast")
+_NVENC_ARGS_BY_QUALITY = {
+    "high": ["-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq", "20", "-b:v", "0",
+             "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "8"],
+    "balanced": ["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "24", "-b:v", "0"],
+    "fast": ["-preset", "p3", "-tune", "hq", "-rc", "vbr", "-cq", "28", "-b:v", "0"],
+}
+_X264_ARGS_BY_QUALITY = {
+    "high": ["-preset", "slow", "-crf", "18", "-tune", "stillimage"],
+    "balanced": ["-preset", "medium", "-crf", "20", "-tune", "stillimage"],
+    "fast": ["-preset", "veryfast", "-crf", "23", "-tune", "stillimage"],
+}
+# Geriye dönük test/entegrasyon erişimi: parametre verilmezse high profili.
+_NVENC_ARGS = _NVENC_ARGS_BY_QUALITY["high"]
+_X264_ARGS = _X264_ARGS_BY_QUALITY["high"]
+_VIDEO_OUTPUT_ARGS = [
+    "-pix_fmt", "yuv420p",
+    "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-movflags", "+faststart",
+]
+# loudnorm tamamen sessiz bir girişte bazı FFmpeg sürümlerinde NaN üretip AAC
+# kodlayıcısını düşürebiliyor. dynaudnorm konuşma seviyesini slaytlar arasında
+# dengelerken sessiz/boş bir segmenti de güvenle geçirir.
+_NARRATION_AUDIO_FILTER = "dynaudnorm=f=150:g=15:p=0.95:m=10"
 
 _encoder_cache: str | None = None  # süreç başına bir kez tespit edilir; "h264_nvenc" ya da "libx264"
 
@@ -37,7 +60,11 @@ def _probe_hardware_encoder() -> str:
     return "libx264"
 
 
-def pick_video_encoder() -> tuple[str, list[str]]:
+def _quality(value: str) -> str:
+    return value if value in QUALITY_PRESETS else "high"
+
+
+def pick_video_encoder(quality_preset: str = "high") -> tuple[str, list[str]]:
     """Bu render süreci için kullanılacak video encoder'ı ve sabit argümanlarını döndürür.
 
     Sonuç süreç ömrü boyunca önbelleklenir: her segment için yeniden GPU probe'u yapmak
@@ -46,9 +73,10 @@ def pick_video_encoder() -> tuple[str, list[str]]:
     global _encoder_cache
     if _encoder_cache is None:
         _encoder_cache = _probe_hardware_encoder()
+    quality = _quality(quality_preset)
     if _encoder_cache == "h264_nvenc":
-        return "h264_nvenc", _NVENC_ARGS
-    return "libx264", _X264_ARGS
+        return "h264_nvenc", _NVENC_ARGS_BY_QUALITY[quality]
+    return "libx264", _X264_ARGS_BY_QUALITY[quality]
 
 
 def ffprobe_duration(path: Path) -> float:
@@ -82,11 +110,9 @@ def build_segment(image_path: Path, audio_path: Path, duration: float, out_path:
         sub_filter = f"subtitles='{_escape_subtitle_path(srt_path)}'"
 
     fade_filter = None
-    af = None
     if opts.fade_transitions and duration > 1.0:
-        fd = 0.4
+        fd = 0.25
         fade_filter = f"fade=t=in:st=0:d={fd},fade=t=out:st={max(duration - fd, 0):.2f}:d={fd}"
-        af = f"afade=t=in:st=0:d={fd},afade=t=out:st={max(duration - fd, 0):.2f}:d={fd}"
 
     if reveal_stages:
         inputs = []
@@ -95,7 +121,7 @@ def build_segment(image_path: Path, audio_path: Path, duration: float, out_path:
         for idx, (stage_path, stage_duration) in enumerate(reveal_stages):
             inputs += ["-loop", "1", "-t", f"{max(stage_duration, 0.05):.3f}", "-i", str(stage_path)]
             label = f"v{idx}"
-            filter_parts.append(f"[{idx}:v]fps={fps},scale={w}:{h}[{label}]")
+            filter_parts.append(f"[{idx}:v]fps={fps},scale={w}:{h}:flags=lanczos,setsar=1[{label}]")
             stage_labels.append(f"[{label}]")
         audio_index = len(reveal_stages)
         inputs += ["-i", str(audio_path)]
@@ -106,22 +132,30 @@ def build_segment(image_path: Path, audio_path: Path, duration: float, out_path:
             if flt:
                 filter_parts.append(f"[{current}]{flt}[{name}]")
                 current = name
-        filter_parts.append(f"[{current}]format=yuv420p[vout]")
+        filter_parts.append(
+            f"[{current}]format=yuv420p,"
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
+        )
 
         base_cmd = ["ffmpeg", "-y", *inputs, "-filter_complex", ";".join(filter_parts),
                     "-map", "[vout]", "-map", f"{audio_index}:a"]
-        if af:
-            base_cmd += ["-af", af]
-        base_cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest", "-t", f"{duration:.3f}"]
+        base_cmd += ["-af", _NARRATION_AUDIO_FILTER, "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+                     "-shortest", "-t", f"{duration:.3f}"]
     else:
         chain = []
         if opts.ken_burns:
             frames = max(int(duration * fps), 1)
+            # Kaynak kareyi önce 2x Lanczos ile büyütmek ve hareketi merkeze
+            # sabitlemek, doğrudan 1080p zoompan'in oluşturduğu titreşim/piksel
+            # kırılmasını ve eski sol-üst köşe yönelimini giderir.
+            chain.append(f"scale={w * 2}:{h * 2}:flags=lanczos")
             chain.append(
-                f"zoompan=z='min(zoom+0.0008,1.07)':d={frames}:s={w}x{h}:fps={fps}"
+                f"zoompan=z='min(zoom+0.00045,1.045)':"
+                f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps={fps}"
             )
         else:
-            chain.append(f"scale={w}:{h}")
+            chain.append(f"scale={w}:{h}:flags=lanczos")
+            chain.append("setsar=1")
             chain.append(f"fps={fps}")
 
         if sub_filter:
@@ -130,22 +164,23 @@ def build_segment(image_path: Path, audio_path: Path, duration: float, out_path:
             chain.append(fade_filter)
 
         chain.append("format=yuv420p")
+        chain.append("setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709")
         vf = ",".join(chain)
 
         base_cmd = ["ffmpeg", "-y", "-loop", "1", "-i", str(image_path), "-i", str(audio_path), "-vf", vf]
-        if af:
-            base_cmd += ["-af", af]
-        base_cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest", "-t", f"{duration:.3f}"]
+        base_cmd += ["-af", _NARRATION_AUDIO_FILTER, "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+                     "-shortest", "-t", f"{duration:.3f}"]
 
-    encoder, encoder_args = pick_video_encoder()
-    cmd = [*base_cmd, "-c:v", encoder, *encoder_args, str(out_path)]
+    encoder, encoder_args = pick_video_encoder(opts.quality_preset)
+    cmd = [*base_cmd, "-c:v", encoder, *encoder_args, *_VIDEO_OUTPUT_ARGS, str(out_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0 and encoder != "libx264":
         # NVENC bir render ortasında başarısız olabilir (sürücü hıçkırığı, eşzamanlı oturum
         # sınırı); tüm render'ı düşürmek yerine bu tek segmenti CPU'da yeniden dener. Sonraki
         # segmentler yine NVENC dener — _encoder_cache burada kalıcı olarak değiştirilmiyor,
         # tek seferlik bir arıza kalıcı bir GPU sorunuymuş gibi tüm render'ı CPU'ya zorlamasın.
-        cmd = [*base_cmd, "-c:v", "libx264", *_X264_ARGS, str(out_path)]
+        cmd = [*base_cmd, "-c:v", "libx264", *_X264_ARGS_BY_QUALITY[_quality(opts.quality_preset)],
+               *_VIDEO_OUTPUT_ARGS, str(out_path)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg segment hatası ({out_path.name}):\n{proc.stderr[-3000:]}")
@@ -187,7 +222,7 @@ def concat_videos(segment_paths: list[Path], out_path: Path, list_file: Path,
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
     if chapters_file is not None and chapters_file.exists():
         cmd += ["-f", "ffmetadata", "-i", str(chapters_file), "-map", "0", "-map_metadata", "1"]
-    cmd += ["-c", "copy", str(out_path)]
+    cmd += ["-c", "copy", "-movflags", "+faststart", str(out_path)]
     subprocess.run(cmd, check=True, capture_output=True)
 
 
@@ -197,6 +232,6 @@ def concat_audio(audio_paths: list[Path], out_path: Path, list_file: Path):
     )
     subprocess.run(
         ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-         "-c:a", "libmp3lame", "-q:a", "2", str(out_path)],
+         "-af", _NARRATION_AUDIO_FILTER, "-c:a", "libmp3lame", "-q:a", "2", str(out_path)],
         check=True, capture_output=True,
     )
