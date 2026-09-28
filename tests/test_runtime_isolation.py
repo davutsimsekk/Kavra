@@ -17,7 +17,9 @@ class LightweightVoiceTests(unittest.TestCase):
     def test_listing_coqui_voices_does_not_construct_model(self, get_provider):
         voices = list_voices("coqui")
         get_provider.assert_not_called()
-        self.assertEqual(voices[0]["id"], "builtin:default")
+        self.assertEqual(voices[0]["id"], "builtin:Damien Black")
+        self.assertIn("önerilen", voices[0]["label"])
+        self.assertIn("builtin:default", [voice["id"] for voice in voices])
 
 
 class SessionSemanticsTests(unittest.TestCase):

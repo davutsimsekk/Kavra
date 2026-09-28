@@ -32,7 +32,7 @@ class FakeProvider:
         if self.delay:
             time.sleep(self.delay)
         seen = {"text": text, "voice": voice, "rate": rate}
-        if voice != "builtin:default":
+        if not voice.startswith("builtin:"):
             vdir = Path(voice).parent
             seen["files"] = {p.name: p.read_bytes() for p in vdir.iterdir()}
         FakeProvider.calls.append(seen)
@@ -108,6 +108,14 @@ class ServerTests(unittest.TestCase):
             second = requests.post(url + "/jobs", json=body, headers=auth).json()
             self.assertEqual(first["id"], second["id"])
 
+    def test_named_builtin_speaker_reaches_provider_unchanged(self):
+        with running_server() as (url, _), tempfile.TemporaryDirectory() as out:
+            target = Path(out) / "damien.mp3"
+            make_client(url).synthesize("coqui", "merhaba", "builtin:Damien Black", target)
+
+            self.assertEqual(FakeProvider.calls[-1]["voice"], "builtin:Damien Black")
+            self.assertTrue(target.is_file())
+
     def test_missing_assets_are_reported_with_409(self):
         with running_server() as (url, _):
             auth = {"Authorization": f"Bearer {TOKEN}"}
@@ -122,6 +130,7 @@ class ServerTests(unittest.TestCase):
             auth = {"Authorization": f"Bearer {TOKEN}"}
             base = {"engine": "coqui", "text": "x", "voice": {"kind": "builtin"}, "requestId": "abcdefgh12345678"}
             for change in ({"engine": "chatterbox"}, {"text": "  "}, {"requestId": "../x"},
+                           {"voice": {"kind": "builtin", "speaker": "satır\nsonu"}},
                            {"voice": {"kind": "assets", "files": {"../evil": "a" * 64}, "primary": "../evil"}}):
                 response = requests.post(url + "/jobs", headers=auth, json={**base, **change})
                 self.assertEqual(response.status_code, 400, change)

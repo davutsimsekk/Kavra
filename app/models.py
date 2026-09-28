@@ -40,6 +40,13 @@ class Slide:
     code: str | None = None
     narration: str = ""
     level: str = "topic"  # "chapter" (divider slide) or "topic"
+    # Konu slaytının GÖRSEL formatı — LLM içeriğe göre seçer (bkz.
+    # prompts/lecture_script_prompt.md ve app/video/slide_renderer.py _CONTENT_LAYOUTS).
+    # "bullets" (sıralı madde listesi) dışındaki tüm değerler `bullets` alanını farklı
+    # yorumlar (ör. "definition" -> "Terim: Tanım" çiftleri). Tanınmayan bir değer ya da
+    # o formatın beklediği yapıya uymayan içerik render sırasında sessizce "bullets"a
+    # düşer — LLM çıktısı güvenilmez olduğundan render asla bu yüzden kırılmamalı.
+    layout: str = "bullets"
     # Bu slaydı üreten ham kaynak bölüm(ler)inin generation_checkpoint.source_fingerprint
     # kimlikleri ve (görüntüleme için) başlıkları. Elle eklenen slaytlarda boştur.
     source_section_ids: list[str] = field(default_factory=list)
@@ -54,6 +61,13 @@ class Slide:
     # düzenindeki gibi içerik panelini ikiye bölüp maddeleri sola, bu görseli
     # sağa yerleştirir — background_image'in aksine tema tasarımı korunur.
     embedded_image: str | None = None
+    # embedded_image'in NEREDEN geldiği — sadece render'da doğru etiketi (ör. "KAYNAK
+    # GÖRSEL" / "İNTERNETTEN GÖRSEL" / "YAPAY ZEKA GÖRSELİ") seçmek için kullanılır,
+    # render mantığını etkilemez. "extracted" (PDF'ten çıkarılan gerçek görsel, varsayılan/
+    # None ile aynı davranır — eski projelerle geriye dönük uyum), "search" (bkz.
+    # app/image_enrichment.py — internetten bulunan gerçek görsel) ya da "generated"
+    # (yapay zeka ile üretilen illüstrasyon, gerçek bir fotoğraf DEĞİL).
+    image_source: str | None = None
 
     def to_dict(self):
         return {
@@ -62,11 +76,13 @@ class Slide:
             "code": self.code,
             "narration": self.narration,
             "level": self.level,
+            "layout": self.layout,
             "sourceSectionIds": self.source_section_ids,
             "sourceTitles": self.source_titles,
             "manuallyEdited": self.manually_edited,
             "backgroundImage": self.background_image,
             "embeddedImage": self.embedded_image,
+            "imageSource": self.image_source,
         }
 
     @staticmethod
@@ -77,9 +93,11 @@ class Slide:
             code=d.get("code"),
             narration=d.get("narration", ""),
             level=d.get("level", "topic"),
+            layout=d.get("layout") or "bullets",
             source_section_ids=list(d.get("sourceSectionIds", []) or []),
             source_titles=list(d.get("sourceTitles", []) or []),
             manually_edited=bool(d.get("manuallyEdited", False)),
             background_image=d.get("backgroundImage"),
             embedded_image=d.get("embeddedImage"),
+            image_source=d.get("imageSource"),
         )

@@ -111,6 +111,13 @@ class VideoOptions:
     subtitles: bool = True
     fade_transitions: bool = True
     ken_burns: bool = False
+    # Maddeler narrasyon boyunca tek tek belirir (Ken Burns ile birlikte kullanılamaz —
+    # bkz. app/video/video_builder.py build_segment'in reveal_stages dalı — o slaytlarda
+    # Ken Burns sessizce devre dışı kalır). Zamanlama, maddenin narrasyondaki GERÇEK
+    # içerik konumuna göre değil, slaytın toplam ses süresine eşit aralıklarla bölünerek
+    # belirlenir (madde bazlı zamanlama gerektirecek TTS/senaryo mimarisi değişikliği
+    # olmadan mümkün olan en iyi yaklaşım budur).
+    bullet_reveal: bool = False
     theme_preset: str = "auto"
     accent_rgb: tuple | None = None
     # Coqui seçiliyken kaç BAĞIMSIZ PROCESS'in aynı anda (her biri kendi
@@ -156,6 +163,7 @@ DEFAULT_SETTINGS = {
     "subtitles": True,
     "fade_transitions": True,
     "ken_burns": False,
+    "bullet_reveal": False,
     "theme_preset": "auto",
     "narration_style": "normal",
     "coqui_parallel_workers": 1,

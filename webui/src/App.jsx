@@ -20,6 +20,7 @@ import {
   Clock3,
   Copy,
   Download,
+  Eye,
   ExternalLink,
   FileText,
   FolderOpen,
@@ -59,6 +60,17 @@ const themeSwatches = {
   warm: ['#fff3d9', '#d87455'],
   mint: ['#e1fff5', '#2ea888'],
   aurora: ['#46389f', '#13a4a6'],
+}
+
+const SLIDE_LAYOUT_LABELS = {
+  bullets: 'Madde listesi',
+  emphasis: 'Vurgu cümlesi',
+  definition: 'Tanım kartı',
+  comparison: 'Karşılaştırma',
+  process: 'Adım akışı',
+  formula: 'Formül',
+  callout: 'Uyarı/İpucu kutusu',
+  code_output: 'Kod + çıktı',
 }
 
 const SNAPSHOT_REASON_LABELS = {
@@ -225,6 +237,7 @@ export default function App() {
   const [deckFocusPrompt, setDeckFocusPrompt] = useState('')
   const [flashcardBusy, setFlashcardBusy] = useState(false)
   const [pronunciationEntries, setPronunciationEntries] = useState([])
+  const [pronunciationSuggestions, setPronunciationSuggestions] = useState(null)
   const [newTerm, setNewTerm] = useState('')
   const [newPhonetic, setNewPhonetic] = useState('')
   const [previewText, setPreviewText] = useState('switch yapısını burada anlatıyoruz')
@@ -245,7 +258,7 @@ export default function App() {
   })
   const [video, setVideo] = useState({
     theme: 'auto', ttsProvider: 'edge', voice: 'tr-TR-AhmetNeural', rate: '+0%',
-    subtitles: true, fadeTransitions: true, kenBurns: false, elevenlabsKey: '',
+    subtitles: true, fadeTransitions: true, kenBurns: false, bulletReveal: false, elevenlabsKey: '',
     coquiParallelWorkers: 1,
     chatterboxParallelWorkers: 1,
     ttsBackend: 'local', remoteTtsConcurrency: 2,
@@ -278,6 +291,7 @@ export default function App() {
           subtitles: s.subtitles,
           fadeTransitions: s.fade_transitions,
           kenBurns: s.ken_burns,
+          bulletReveal: s.bullet_reveal || false,
           coquiParallelWorkers: s.coqui_parallel_workers || 1,
           chatterboxParallelWorkers: s.chatterbox_parallel_workers || 1,
           ttsBackend: s.tts_backend || 'local',
@@ -580,7 +594,7 @@ export default function App() {
             ttsProvider: video.ttsProvider, voice: video.voice, rate: video.rate,
             elevenlabsKey: video.elevenlabsKey, subtitles: video.subtitles,
             fadeTransitions: video.fadeTransitions, kenBurns: video.kenBurns,
-            theme: video.theme,
+            bulletReveal: video.bulletReveal, theme: video.theme,
             coquiParallelWorkers: video.coquiParallelWorkers,
             chatterboxParallelWorkers: video.chatterboxParallelWorkers,
           },
@@ -720,6 +734,38 @@ export default function App() {
     savePronunciationOverrides(overrides, `"${term}" için özel telaffuz kaldırıldı.`)
   }
 
+  const requestPronunciationSuggestions = async () => {
+    if (!project?.slides?.length || activeJob) return
+    try {
+      setJobState({ status: 'queued', progress: 0, message: 'Anlatım taranıyor' })
+      const response = await api(`${apiBase}/pronunciation/suggest`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: visionApiKey.trim() }),
+      })
+      rememberActiveJob({ id: response.jobId, type: 'pronunciationSuggest' }, { view: 'video', stage: 'script' })
+    } catch (error) {
+      setJobState(null)
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const toggleSuggestionAccepted = (term) => {
+    setPronunciationSuggestions((current) => current.map((s) => s.term === term ? { ...s, accepted: !s.accepted } : s))
+  }
+
+  const editSuggestionPhonetic = (term, phonetic) => {
+    setPronunciationSuggestions((current) => current.map((s) => s.term === term ? { ...s, phonetic } : s))
+  }
+
+  const saveAcceptedSuggestions = () => {
+    const accepted = pronunciationSuggestions.filter((s) => s.accepted && s.phonetic.trim())
+    const overrides = {}
+    pronunciationEntries.filter((e) => e.isOverride).forEach((e) => { overrides[e.term] = e.phonetic })
+    accepted.forEach((s) => { overrides[s.term] = s.phonetic.trim() })
+    savePronunciationOverrides(overrides, `${accepted.length} terim telaffuz sözlüğüne eklendi.`)
+    setPronunciationSuggestions(null)
+  }
+
   const runPronunciationPreview = async () => {
     if (!previewText.trim() || previewBusy) return
     setPreviewBusy(true)
@@ -772,6 +818,46 @@ export default function App() {
             } : current)
             setToast({ type: 'success', text: 'Slayt yeniden üretildi.' })
             refreshSnapshots()
+          } else if (activeJob.type === 'enrichImages') {
+            setProject((current) => current ? {
+              ...current,
+              slides: job.result.slides,
+              quality: job.result.quality || current.quality,
+              assets: job.result.assets || current.assets,
+            } : current)
+            const added = job.result.imagesAdded || []
+            const attempted = job.result.attemptedCount ?? added.length
+            let text
+            if (!attempted) {
+              text = 'Görsel eklemeye uygun slayt bulunamadı.'
+            } else if (!added.length) {
+              text = `${attempted} slaytta görsel aranıp üretilmeye çalışıldı ama hiçbiri başarılı olmadı.`
+            } else {
+              const searchCount = added.filter((a) => a.source === 'search').length
+              const generatedCount = added.filter((a) => a.source === 'generated').length
+              const shown = added.slice(0, 8).map((a) => a.index).join(', ')
+              const rest = added.length > 8 ? ` +${added.length - 8} diğer` : ''
+              text = `${added.length}/${attempted} slayta görsel eklendi (${searchCount} internetten, ${generatedCount} yapay zeka ile) — Slayt ${shown}${rest}.`
+            }
+            setToast({ type: 'success', text })
+          } else if (activeJob.type === 'visionNarrate') {
+            setProject((current) => current ? {
+              ...current,
+              slides: job.result.slides,
+              quality: job.result.quality || current.quality,
+              assets: job.result.assets || current.assets,
+            } : current)
+            setToast({ type: 'success', text: `${job.result.slides.length} slayt görsel tabanlı anlatımla üretildi.` })
+            refreshSnapshots()
+          } else if (activeJob.type === 'pronunciationSuggest') {
+            const entries = Object.entries(job.result.suggestions || {})
+            if (!entries.length) {
+              setToast({ type: 'success', text: 'Yeni bir telaffuz önerisi bulunamadı.' })
+            } else {
+              setPronunciationSuggestions(entries.map(([term, phonetic]) => ({ term, phonetic, accepted: true })))
+              setShowPronunciation(true)
+              setToast({ type: 'success', text: `${entries.length} yeni terim önerildi, gözden geçirip kaydedebilirsin.` })
+            }
           } else if (activeJob.type === 'chapters') {
             setToast({ type: 'success', text: `${job.result.chapters.length} bölüm dosyası hazır.` })
             if (project?.id) {
@@ -1035,6 +1121,49 @@ export default function App() {
         }),
       })
       rememberActiveJob({ id: response.jobId, type: 'regenerate' }, { view: 'video', stage: 'script' })
+    } catch (error) {
+      setJobState(null)
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const enrichImages = async () => {
+    if (!project?.slides.length || activeJob) return
+    try {
+      const { eligibleCount, totalSlides } = await api(`${apiBase}/enrich-images/eligible-count`)
+      if (!eligibleCount) {
+        setToast({ type: 'success', text: 'Görsel eklenecek uygun slayt yok (bölüm kapakları, kod örnekli slaytlar ve zaten görseli olan slaytlar hariç tutulur).' })
+        return
+      }
+      if (!window.confirm(`${eligibleCount}/${totalSlides} slaytta önce internetten gerçek bir görsel aranacak, bulunamazsa yapay zeka ile bir illüstrasyon üretilecek. Bu, Gemini API'na gerçek istekler gönderir. Devam edilsin mi?`)) return
+      setJobState({ status: 'queued', progress: 0, message: 'Görsel zenginleştirme hazırlanıyor' })
+      const response = await api(`${apiBase}/enrich-images`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: visionApiKey.trim() }),
+      })
+      rememberActiveJob({ id: response.jobId, type: 'enrichImages' }, { view: 'video', stage: 'script' })
+    } catch (error) {
+      setJobState(null)
+      setToast({ type: 'error', text: error.message })
+    }
+  }
+
+  const visionNarrate = async () => {
+    if (!project || activeJob) return
+    try {
+      const { eligibleCount, totalSections } = await api(`${apiBase}/vision-narrate/eligible-count`)
+      if (!eligibleCount) {
+        setToast({ type: 'error', text: 'Görsel tabanlı anlatım için uygun sayfa yok (yalnızca PDF kaynaklar destekleniyor).' })
+        return
+      }
+      const warning = project.slides.length ? `Bu, mevcut ${project.slides.length} slaydın TAMAMININ yerini alacak. ` : ''
+      if (!window.confirm(`${warning}${eligibleCount}/${totalSections} sayfa, görseliyle birlikte gerçek bir Gemini çağrısıyla yeniden anlatılacak (daha önce işlenmiş sayfalar önbellekten gelir, tekrar ücretlendirilmez). Devam edilsin mi?`)) return
+      setJobState({ status: 'queued', progress: 0, message: 'Görsel tabanlı anlatım hazırlanıyor' })
+      const response = await api(`${apiBase}/vision-narrate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: visionApiKey.trim(), style: llm.style }),
+      })
+      rememberActiveJob({ id: response.jobId, type: 'visionNarrate' }, { view: 'video', stage: 'script' })
     } catch (error) {
       setJobState(null)
       setToast({ type: 'error', text: error.message })
@@ -1309,6 +1438,30 @@ export default function App() {
         <ProgressStrip job={activeJob?.type === 'script' || jobState?.kind === 'script' ? jobState : null} />
       </details>
 
+      <details className="panel generation-console">
+        <summary><ImageIcon size={20} /><span>Slaytlara görsel ekle<small>Önce internetten gerçek bir görsel aranır, bulunamazsa yapay zeka ile üretilir</small></span><ChevronRight size={18} className="disclosure-chevron" /></summary>
+        {!bootstrap.keysConfigured.gemini && (
+          <label className="field"><span>Gemini API anahtarı</span><input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Gemini API anahtarın" /></label>
+        )}
+        <div className="session-note wide"><ImageIcon size={14} /><span>Bölüm kapakları, kod örnekli slaytlar ve zaten görseli olan slaytlar atlanır. Eklenen görsel gerçek bir web sonucuysa "İnternetten görsel", değilse "Yapay zeka görseli" olarak etiketlenir — üretilen görsel gerçeği birebir yansıtmayabilir.</span></div>
+        <button className="button primary" onClick={enrichImages} disabled={!project?.slides.length || Boolean(activeJob)}>
+          <ImageIcon size={17} /> {activeJob?.type === 'enrichImages' ? 'Görsel aranıyor/üretiliyor…' : 'Uygun slaytlara görsel ekle'}
+        </button>
+        <ProgressStrip job={activeJob?.type === 'enrichImages' || jobState?.kind === 'enrichImages' ? jobState : null} />
+      </details>
+
+      <details className="panel generation-console">
+        <summary><Eye size={20} /><span>Sayfaları görselle birlikte anlat<small>PDF kaynaklar için — tablo/diyagram/formülü görüntüden doğru okur</small></span><ChevronRight size={18} className="disclosure-chevron" /></summary>
+        {!bootstrap.keysConfigured.gemini && (
+          <label className="field"><span>Gemini API anahtarı</span><input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Gemini API anahtarın" /></label>
+        )}
+        <div className="session-note wide"><Eye size={14} /><span>Her sayfa GÖRÜNTÜSÜYLE birlikte okunur — bir tablo, diyagram, formül ya da renkli vurgu varsa düz metinden çok daha doğru anlatır. Sadece PDF kaynaklarda çalışır ve <strong>mevcut slaytların tamamının yerini alır</strong>. Daha önce işlenmiş sayfalar önbellekten gelir, tekrar ücretlendirilmez.</span></div>
+        <button className="button primary" onClick={visionNarrate} disabled={!project || Boolean(activeJob)}>
+          <Eye size={17} /> {activeJob?.type === 'visionNarrate' ? 'Görsel tabanlı anlatım üretiliyor…' : 'Sayfaları görselle birlikte anlat'}
+        </button>
+        <ProgressStrip job={activeJob?.type === 'visionNarrate' || jobState?.kind === 'visionNarrate' ? jobState : null} />
+      </details>
+
       <section className="panel slide-rail">
         <div className="panel-toolbar"><div><span className="kicker">AKIŞ</span><h3>{project?.slides.length || 0} slayt</h3></div><button className="icon-button" onClick={addSlide} disabled={savingSlides || Boolean(activeJob)} title="Yeni slayt"><Plus size={18} /></button></div>
         <label className="search-field"><Search size={16} /><input aria-label="Slaytlarda ara" placeholder="Slaytlarda ara…" value={slideQuery} onChange={(e) => setSlideQuery(e.target.value)} /></label>
@@ -1346,7 +1499,7 @@ export default function App() {
           >
             <GripVertical size={16} className="grip" />
             <span className="slide-number">{String(index + 1).padStart(2, '0')}</span>
-            <span className="slide-copy"><strong>{slide.title || 'Başlıksız'}</strong><small>{slide.level === 'chapter' ? 'Bölüm kapağı' : `${slide.bullets.length} madde`}</small></span>
+            <span className="slide-copy"><strong>{slide.title || 'Başlıksız'}</strong><small>{slide.level === 'chapter' ? 'Bölüm kapağı' : `${SLIDE_LAYOUT_LABELS[slide.layout] || 'Madde listesi'} · ${slide.bullets.length}`}</small></span>
             <span className="slide-actions">
               <button onClick={(event) => { event.stopPropagation(); moveSlide(index, -1) }} disabled={savingSlides || Boolean(activeJob) || index === 0} aria-label="Yukarı taşı"><ArrowUp size={14} /></button>
               <button onClick={(event) => { event.stopPropagation(); moveSlide(index, 1) }} disabled={savingSlides || Boolean(activeJob) || index === project.slides.length - 1} aria-label="Aşağı taşı"><ArrowDown size={14} /></button>
@@ -1371,7 +1524,7 @@ export default function App() {
           <label className="field"><span>Tür</span><select value={draft.level} onChange={(e) => updateDraft({ ...draft, level: e.target.value })}><option value="topic">Konu slaytı</option><option value="chapter">Bölüm kapağı</option></select></label>
           </div>
           <label className="field"><span>Tam anlatım metni</span><textarea rows="11" value={draft.narration} onChange={(e) => updateDraft({ ...draft, narration: e.target.value })} /></label>
-          <label className="field"><span>Maddeler <em>satır başına bir tane</em></span><textarea rows="5" value={draft.bullets.join('\n')} onChange={(e) => updateDraft({ ...draft, bullets: e.target.value.split('\n') })} /></label>
+          <label className="field"><span>Maddeler <em>satır başına bir tane{draft.level !== 'chapter' ? ` — format: ${SLIDE_LAYOUT_LABELS[draft.layout] || 'Madde listesi'}` : ''}</em></span><textarea rows="5" value={draft.bullets.join('\n')} onChange={(e) => updateDraft({ ...draft, bullets: e.target.value.split('\n') })} /></label>
           <details className="editor-code" key={selectedSlide} open={Boolean(draft.code) || undefined}><summary>Kod örneği <span>İsteğe bağlı</span><ChevronRight size={14} className="disclosure-chevron" /></summary>
           <label className="field"><span>Kod</span><textarea className="code-input" rows="5" value={draft.code || ''} onChange={(e) => updateDraft({ ...draft, code: e.target.value || null })} placeholder="İsteğe bağlı" /></label>
           </details>
@@ -1410,6 +1563,7 @@ export default function App() {
           <Toggle checked={video.subtitles} onChange={(value) => setVideo({ ...video, subtitles: value })} label="Akıllı altyazı" hint="Kod slaytlarında otomatik gizlenir" />
           <Toggle checked={video.fadeTransitions} onChange={(value) => setVideo({ ...video, fadeTransitions: value })} label="Yumuşak geçişler" hint="Slaytlar arasında fade" />
           <Toggle checked={video.kenBurns} onChange={(value) => setVideo({ ...video, kenBurns: value })} label="Kamera hareketi" hint="Hafif Ken Burns yakınlaştırması" />
+          <Toggle checked={video.bulletReveal} onChange={(value) => setVideo({ ...video, bulletReveal: value })} label="Aşamalı madde gösterimi" hint="Maddeler anlatım boyunca tek tek belirir (Kamera hareketiyle birlikte kullanılamaz)" />
         </div>
       </section>
 
@@ -1466,9 +1620,9 @@ export default function App() {
                 onChange={(e) => setVideo({ ...video, chatterboxParallelWorkers: Number(e.target.value) })}
               >
                 <option value={1}>1 model — sıralı üretim (en stabil)</option>
-                <option value={2}>2 paralel model — slaytlar iki GPU worker’ına bölünür</option>
+                <option value={2}>2 paralel model — ölçülen 1,99× hız (~7,8 GB tepe VRAM)</option>
               </select>
-              <small>İlk model yüklenmesi beklenir; sonrasında worker'lar kendi slaytlarını sırayla üretir. RTX 4060 8 GB için iki model güvenli üst sınırdır. CUDA belleği yetmezse sistem otomatik olarak tek modele iner.</small>
+              <small>İlk model yüklenmesi ölçüme dahil değildir; sonrasında worker'lar kendi slaytlarını sırayla üretir. RTX 4060 8 GB üzerinde 3 model belleği tamamen doldurup belirgin biçimde yavaşladığı için güvenli üst sınır 2'dir. CUDA belleği yetmezse sistem otomatik olarak tek modele iner.</small>
             </label>
           )}
         </div>
@@ -1728,7 +1882,6 @@ export default function App() {
           {project ? <><strong title={project.name || project.id}>{project.name || projectLabel(project.id)}</strong><small>{project.sections.length} bölüm · {project.slides.length} slayt</small></> : <p>Yeni bir kaynak ekleyerek başla.</p>}
         </div>
         {bootstrap.projects.length > 0 && <label className="project-picker"><span>Son projeler</span><select value={project?.id || ''} disabled={Boolean(activeJob)} onChange={(event) => event.target.value && loadProject(event.target.value)}><option value="">Proje seç…</option>{bootstrap.projects.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}</select></label>}
-        <div className="local-badge"><span className="status-dot" /><span><strong>Yerel ve hazır</strong><small>Veriler bu bilgisayarda</small></span></div>
       </aside>
 
       <main className="main-shell">
@@ -1757,6 +1910,32 @@ export default function App() {
             <button className="icon-button" onClick={() => setShowPronunciation(false)}><X size={18} /></button>
           </div>
           <div className="modal-body">
+            <div className="source-row">
+              <span className="source-label">AI ile öner: bu dersteki TÜM anlatım metni taranır, Türkçe TTS'in yanlış okuyabileceği İngilizce/teknik terimler bulunur.</span>
+              <button type="button" className="button ghost compact" onClick={requestPronunciationSuggestions} disabled={!project?.slides?.length || Boolean(activeJob)}>
+                <WandSparkles size={13} /> {activeJob?.type === 'pronunciationSuggest' ? 'Taranıyor…' : 'AI ile öner'}
+              </button>
+            </div>
+            <ProgressStrip job={activeJob?.type === 'pronunciationSuggest' || jobState?.kind === 'pronunciationSuggest' ? jobState : null} />
+            {pronunciationSuggestions && <div className="pronunciation-suggestions">
+              <div className="source-row"><span className="source-label">{pronunciationSuggestions.length} öneri — kaydetmeden önce gözden geçir, istemediklerini işaretten kaldır ya da fonetik yazımı düzenle.</span></div>
+              <div className="pronunciation-list">
+                {pronunciationSuggestions.map((s) => (
+                  <div key={s.term} className="pronunciation-row">
+                    <input type="checkbox" checked={s.accepted} onChange={() => toggleSuggestionAccepted(s.term)} aria-label={`${s.term} önerisini kabul et`} />
+                    <span className="pronunciation-term">{s.term}</span>
+                    <span className="pronunciation-arrow">→</span>
+                    <input className="pronunciation-phonetic-input" value={s.phonetic} onChange={(e) => editSuggestionPhonetic(s.term, e.target.value)} disabled={!s.accepted} />
+                  </div>
+                ))}
+              </div>
+              <div className="source-row">
+                <button type="button" className="button ghost compact" onClick={() => setPronunciationSuggestions(null)}>Vazgeç</button>
+                <button type="button" className="button primary compact" onClick={saveAcceptedSuggestions} disabled={!pronunciationSuggestions.some((s) => s.accepted)}>
+                  <Check size={14} /> Seçilenleri Kaydet
+                </button>
+              </div>
+            </div>}
             <div className="pronunciation-preview">
               <label className="field wide"><span>Hızlı önizleme (bir cümle yaz, nasıl seslendirileceğini dinle)</span>
                 <textarea rows="2" value={previewText} onChange={(e) => setPreviewText(e.target.value)} />

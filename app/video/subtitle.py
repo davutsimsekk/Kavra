@@ -82,6 +82,24 @@ def _fmt_ass(t: float) -> str:
     return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+# "Okunmamış" kelimeler bu renkte kalır (mevcut düz altyazı rengiyle aynı); "okunmuş" kelimeler
+# temanın accent rengine döner (bkz. _ass_color / write_ass'in accent parametresi). ASS'de bu
+# ikisi PrimaryColour/SecondaryColour olarak adlandırılır ama anlamları göründüğü gibi değil —
+# ampirik olarak libass ile doğrulandı (bkz. commit notu): \k/\kf süresi dolana kadar kelime
+# SecondaryColour'da durur, süre dolunca PrimaryColour'a GEÇER ve kalıcı olur. Yani "sonunda
+# kalacağı renk" (okunmuş = accent) PrimaryColour, "henüz okunmadığında görüneceği renk"
+# (nötr beyaz) SecondaryColour'dur — sezgiye ters ama gerçek davranış bu.
+_UNREAD_ASS_COLOR = "&H00F2F2F2"
+_DEFAULT_ACCENT_ASS_COLOR = "&H00B1D68E"  # Kavra mint (#8ED6B1), tema vermeyen çağrılar için düşüş
+
+
+def _ass_color(rgb: tuple[int, int, int] | None) -> str:
+    if rgb is None:
+        return _DEFAULT_ACCENT_ASS_COLOR
+    r, g, b = rgb
+    return f"&H00{b:02X}{g:02X}{r:02X}"  # ASS: &HAABBGGRR, alpha her zaman 00 (tam opak)
+
+
 ASS_HEADER_TEMPLATE = """[Script Info]
 ScriptType: v4.00+
 PlayResX: {w}
@@ -91,23 +109,43 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Segoe UI,{fontsize},&H00F2F2F2,&H000000FF,&H00000000,&HB0101010,0,0,0,0,100,100,0,0,3,2,0,2,80,80,{marginv},1
+Style: Default,Segoe UI,{fontsize},{accent},{unread},&H00000000,&HB0101010,0,0,0,0,100,100,0,0,3,2,0,2,80,80,{marginv},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
+# Bir \kf süresi 0 veya negatif olursa (üst üste binen/aşırı kısa kelime zamanlaması —
+# estimate_word_timings'te teorik olarak, gerçek TTS kelime zamanlamasında pratikte olmaz)
+# libass'in bu değeri nasıl işlediği belirsiz; en az 1 santisaniyeye sabitleniyor.
+_MIN_KF_CENTISECONDS = 1
+
+
+def _karaoke_line(group: list[WordTiming]) -> str:
+    """Bir altyazı grubunu, kelimeler okundukça temanın accent rengine dönen kayan dolgu
+    (\\kf) etiketleriyle yazar. Her kelimenin süresi BİR SONRAKİ kelimenin başlangıcına kadar
+    uzatılır (son kelime hariç, o kendi end-start'ını kullanır) — böylece kelimeler arası doğal
+    duraklamalar da o anki kelimenin vurgusuna dahil olur, vurgu narrasyonla senkron akar."""
+    parts = []
+    for j, w in enumerate(group):
+        span = group[j + 1].start - w.start if j + 1 < len(group) else w.end - w.start
+        centiseconds = max(_MIN_KF_CENTISECONDS, round(span * 100))
+        text = escape_ass_text(w.text.replace("\n", " "))
+        parts.append(f"{{\\kf{centiseconds}}}{text} ")
+    return "".join(parts).rstrip()
+
 
 def write_ass(words: list[WordTiming], out_path: Path, width: int, height: int,
-              margin_v: int = 60, fontsize: int = 44):
-    header = ASS_HEADER_TEMPLATE.format(w=width, h=height, fontsize=fontsize, marginv=margin_v)
+              margin_v: int = 60, fontsize: int = 44, accent: tuple[int, int, int] | None = None):
+    header = ASS_HEADER_TEMPLATE.format(w=width, h=height, fontsize=fontsize, marginv=margin_v,
+                                        accent=_ass_color(accent), unread=_UNREAD_ASS_COLOR)
     events = []
     if words:
         i = 0
         while i < len(words):
             group = words[i:i + WORDS_PER_CAPTION]
             start, end = group[0].start, group[-1].end
-            caption = escape_ass_text(" ".join(w.text for w in group).replace("\n", " "))
+            caption = _karaoke_line(group)
             events.append(f"Dialogue: 0,{_fmt_ass(start)},{_fmt_ass(end)},Default,,0,0,0,,{caption}")
             i += WORDS_PER_CAPTION
     out_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")

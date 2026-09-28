@@ -226,6 +226,135 @@ class WebApiTests(unittest.TestCase):
                 self.assertTrue((pdir / "snapshots").exists())
 
 
+class EnrichImagesEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="http://localhost")
+
+    def test_eligible_count_excludes_chapter_and_code_slides(self):
+        slides = [
+            Slide(title="Bölüm", level="chapter"),
+            Slide(title="Kod slaydı", code="int a = 1;"),
+            Slide(title="Normal slayt", narration="x"),
+        ]
+        with _temp_project(slides) as pdir:
+            response = self.client.get(f"/api/projects/{pdir.name}/enrich-images/eligible-count")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"eligibleCount": 1, "totalSlides": 3})
+
+    def test_missing_api_key_is_rejected_before_queuing_a_job(self):
+        with _temp_project([Slide(title="x", narration="y")]) as pdir:
+            with patch.object(api_module, "get_api_key", return_value=""):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/enrich-images",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={},
+                )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Gemini API anahtarı", response.json()["detail"])
+
+    def test_empty_project_is_rejected(self):
+        with _temp_project([]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/enrich-images",
+                headers={"Origin": "http://127.0.0.1:5173"},
+                json={},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_queues_a_job_that_updates_slides_with_the_enriched_result(self):
+        slide = Slide(title="x", narration="y")
+
+        def fake_enrich(pdir, slides, api_key, force=False, progress_cb=None):
+            if progress_cb:
+                progress_cb(1, 1, slides[0].title)
+            slides[0].embedded_image = str(pdir / "assets" / "images" / "slide_001.jpg")
+            slides[0].image_source = "search"
+            return slides
+
+        with _temp_project([slide]) as pdir:
+            with patch.object(api_module, "get_api_key", return_value="test-key"), \
+                 patch("app.image_enrichment.enrich_slides_with_images", side_effect=fake_enrich):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/enrich-images",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={},
+                )
+                self.assertEqual(response.status_code, 200)
+                job_id = response.json()["jobId"]
+
+                for _ in range(50):
+                    job = self.client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"complete", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                self.assertEqual(job["result"]["slides"][0]["imageSource"], "search")
+                self.assertEqual(job["result"]["attemptedCount"], 1)
+                self.assertEqual(job["result"]["imagesAdded"], [{"index": 1, "title": "x", "source": "search"}])
+
+    def test_summary_reports_zero_added_when_every_attempt_fails(self):
+        slide = Slide(title="x", narration="y")
+
+        def fake_enrich_all_fail(pdir, slides, api_key, force=False, progress_cb=None):
+            if progress_cb:
+                progress_cb(1, 1, slides[0].title)
+            return slides  # embedded_image never set — every attempt failed
+
+        with _temp_project([slide]) as pdir:
+            with patch.object(api_module, "get_api_key", return_value="test-key"), \
+                 patch("app.image_enrichment.enrich_slides_with_images", side_effect=fake_enrich_all_fail):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/enrich-images",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={},
+                )
+                job_id = response.json()["jobId"]
+                for _ in range(50):
+                    job = self.client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"complete", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                self.assertEqual(job["result"]["attemptedCount"], 1)
+                self.assertEqual(job["result"]["imagesAdded"], [])
+
+    def test_summary_only_counts_slides_that_were_actually_eligible(self):
+        """Chapter/kod slaytları hiç denenmediğinden özet listesine de girmemeli."""
+        slides = [
+            Slide(title="Bölüm", level="chapter"),
+            Slide(title="Kod slaydı", code="int a = 1;"),
+            Slide(title="Normal slayt", narration="x"),
+        ]
+
+        def fake_enrich(pdir, current_slides, api_key, force=False, progress_cb=None):
+            for s in current_slides:
+                if s.title == "Normal slayt":
+                    s.embedded_image = str(pdir / "assets" / "images" / "slide_003.jpg")
+                    s.image_source = "generated"
+            return current_slides
+
+        with _temp_project(slides) as pdir:
+            with patch.object(api_module, "get_api_key", return_value="test-key"), \
+                 patch("app.image_enrichment.enrich_slides_with_images", side_effect=fake_enrich):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/enrich-images",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={},
+                )
+                job_id = response.json()["jobId"]
+                for _ in range(50):
+                    job = self.client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"complete", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                self.assertEqual(job["result"]["attemptedCount"], 1)
+                self.assertEqual(
+                    job["result"]["imagesAdded"],
+                    [{"index": 3, "title": "Normal slayt", "source": "generated"}],
+                )
+
+
 class GenerateEndpointDurationLimitTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app, base_url="http://localhost")
@@ -1066,6 +1195,115 @@ class RenderCoquiParallelWorkersValidationTests(unittest.TestCase):
                 # _render_in_isolated_process(job_id, pdir, slides, provider_name, voice, rate, options)
                 options = fake_render.call_args[0][-1]
                 self.assertEqual(options.coqui_parallel_workers, 1)
+
+
+class VisionNarrateEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="http://localhost")
+
+    def _pdf_sections(self):
+        return [
+            {"breadcrumb": "", "title": "1. Giriş", "text": "birinci sayfa metni", "code_blocks": [], "level": 3},
+            {"breadcrumb": "", "title": "Elle eklenen", "text": "sayfa numarası yok", "code_blocks": [], "level": 3},
+        ]
+
+    def test_requires_a_previously_parsed_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects_dir = Path(tmp)
+            pdir = projects_dir / "test-proje"
+            (pdir / "assets").mkdir(parents=True)
+            with patch.object(api_module, "PROJECTS_DIR", projects_dir):
+                response = self.client.get(f"/api/projects/{pdir.name}/vision-narrate/eligible-count")
+            self.assertEqual(response.status_code, 400)
+
+    def test_eligible_count_only_includes_page_numbered_sections(self):
+        with _temp_project([], sections=self._pdf_sections()) as pdir:
+            response = self.client.get(f"/api/projects/{pdir.name}/vision-narrate/eligible-count")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"eligibleCount": 1, "totalSections": 2})
+
+    def test_missing_api_key_is_rejected_before_queuing_a_job(self):
+        with _temp_project([], sections=self._pdf_sections()) as pdir:
+            with patch.object(api_module, "get_api_key", return_value=""):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/vision-narrate",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={},
+                )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Gemini API anahtarı", response.json()["detail"])
+
+    def test_queues_a_job_that_replaces_the_slides_with_the_vision_result(self):
+        def fake_generate(pdir, sections, api_key, model=None, style_note="", progress_cb=None):
+            if progress_cb:
+                progress_cb(1, 1, sections[0].title)
+            return [Slide(title="Görsel Tabanlı Slayt", narration="x", source_section_ids=["fp"])]
+
+        with _temp_project([Slide(title="Eski slayt")], sections=self._pdf_sections()) as pdir:
+            with patch.object(api_module, "get_api_key", return_value="test-key"), \
+                 patch("app.vision_narration.generate_slides_with_vision", side_effect=fake_generate):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/vision-narrate",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={},
+                )
+                self.assertEqual(response.status_code, 200)
+                job_id = response.json()["jobId"]
+
+                for _ in range(50):
+                    job = self.client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"complete", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                self.assertEqual(len(job["result"]["slides"]), 1)
+                self.assertEqual(job["result"]["slides"][0]["title"], "Görsel Tabanlı Slayt")
+                self.assertTrue((pdir / "snapshots").exists())
+
+
+class PronunciationSuggestEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app, base_url="http://localhost")
+
+    def test_empty_project_is_rejected(self):
+        with _temp_project([]) as pdir:
+            response = self.client.post(
+                f"/api/projects/{pdir.name}/pronunciation/suggest",
+                headers={"Origin": "http://127.0.0.1:5173"}, json={},
+            )
+            self.assertEqual(response.status_code, 404)
+
+    def test_missing_api_key_is_rejected_before_queuing_a_job(self):
+        with _temp_project([Slide(title="x", narration="widget kullan")]) as pdir:
+            with patch.object(api_module, "get_api_key", return_value=""):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/pronunciation/suggest",
+                    headers={"Origin": "http://127.0.0.1:5173"}, json={},
+                )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Gemini API anahtarı", response.json()["detail"])
+
+    def test_queues_a_job_that_returns_suggestions_without_saving_them(self):
+        with _temp_project([Slide(title="x", narration="widget kullan")]) as pdir:
+            with patch.object(api_module, "get_api_key", return_value="test-key"), \
+                 patch("app.pronunciation_scan.suggest_pronunciations", return_value={"widget": "vicet"}), \
+                 patch("app.tts.pronunciation.save_overrides") as save_overrides:
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/pronunciation/suggest",
+                    headers={"Origin": "http://127.0.0.1:5173"}, json={},
+                )
+                self.assertEqual(response.status_code, 200)
+                job_id = response.json()["jobId"]
+
+                for _ in range(50):
+                    job = self.client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"complete", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                self.assertEqual(job["result"]["suggestions"], {"widget": "vicet"})
+                # Öneri KAYDEDİLMEMİŞ olmalı -- bu endpoint asla save_overrides çağırmaz.
+                save_overrides.assert_not_called()
 
 
 if __name__ == "__main__":

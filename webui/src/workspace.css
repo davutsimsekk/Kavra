@@ -208,7 +208,7 @@ details[open] > summary > .disclosure-chevron { transform:rotate(90deg); }
   .deck-create { grid-column:1; grid-row:2; }.deck-library { grid-row:1; }
   .hub-module-card { padding:24px; }
   .app-shell { display:block; }.sidebar { position:static; height:auto; padding:16px 20px; border-right:0; border-bottom:1px solid var(--line); }
-  .sidebar .brand,.sidebar .project-card,.sidebar .project-picker,.sidebar .local-badge { display:none; }
+  .sidebar .brand,.sidebar .project-card,.sidebar .project-picker { display:none; }
   .sidebar-links { display:flex; padding:0 0 10px; margin:0 0 10px; gap:10px; }
   .step-nav { grid-template-columns:repeat(3,1fr); margin:0; }.step-nav button { grid-template-columns:20px 1fr; text-align:center; justify-content:center; }.step-nav .nav-number,.step-nav button > svg:last-child { display:none; }
   .main-shell { min-height:calc(100vh - 128px); }
@@ -238,7 +238,11 @@ details[open] > summary > .disclosure-chevron { transform:rotate(90deg); }
   .section-row { grid-template-columns:20px 24px minmax(0,1fr); }.char-count { display:none; }
   .source-row .button.ghost.compact { white-space:normal; }
   .resume-note { grid-template-columns:18px 1fr; }.resume-note button { grid-column:2; text-align:left; }
-  .theme-grid { grid-template-columns:1fr 1fr; }
+  /* 2 sütunda tema kartının metin alanı ~90px'e düşüyor; "Beyaz Minimal", "Notebook Açık" gibi
+     isimler .theme-card strong'un nowrap+ellipsis'i yüzünden "Beyaz Min...", "Notebook ..." diye
+     kesiliyor (bkz. KAVRA_PROJECT_HANDOFF.md mobil uyumluluk notu). Telefon genişliğinde tek
+     sütuna düşürmek her karta ismin tamamına yetecek alan veriyor. */
+  .theme-grid { grid-template-columns:1fr; }
   .pronunciation-add { grid-template-columns:1fr; }
   .modal-backdrop { padding:12px; }
   .preview-metrics { flex-wrap:wrap; }

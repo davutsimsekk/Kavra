@@ -1,6 +1,7 @@
 # Chatterbox'ın yalıtılmış venv'ine kurulur. Torch/torchaudio burada özellikle
-# yoktur: ana TTS ortamındaki CUDA kopyası .pth ile paylaşılır. Son komut:
-#   python -m pip install --no-deps chatterbox-tts==0.1.7
+# yoktur: ana TTS ortamındaki CUDA kopyası .pth ile paylaşılır. Multilingual V3
+# henüz PyPI 0.1.7 paketinde olmadığı için install_chatterbox.py resmî GitHub
+# commit'ini --no-deps ile kurar.
 
 transformers==5.2.0
 diffusers==0.29.0

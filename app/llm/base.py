@@ -73,7 +73,7 @@ def _merge_into_one_slide(slides: list[Slide], section_chunk: list[RawSection]) 
     """
     if not slides:
         title = section_chunk[0].title if section_chunk else ""
-        return Slide(title=title, bullets=[], code=None, narration="", level="topic")
+        return Slide(title=title, bullets=[], code=None, narration="", level="topic", layout="bullets")
     merged_bullets: list[str] = []
     for slide in slides:
         for bullet in slide.bullets:
@@ -83,6 +83,11 @@ def _merge_into_one_slide(slides: list[Slide], section_chunk: list[RawSection]) 
     return Slide(
         title=first.title,
         bullets=merged_bullets[:6],
+        # Birden fazla slaydın maddeleri burada körlemesine birleştiriliyor; kaynak
+        # slaytlardan biri "definition"/"comparison" gibi özel bir format kullanmış olsa
+        # bile birleşmiş liste artık o formatın beklediği yapıda değil — güvenli tek
+        # seçenek düz madde listesi olarak göstermek.
+        layout="bullets",
         code=next((s.code for s in slides if s.code), None),
         narration=" ".join(s.narration.strip() for s in slides if s.narration.strip()),
         level=first.level,
@@ -158,7 +163,10 @@ def build_continuity_context(slides: list[Slide], max_recent: int = 6,
 
     parts.append(
         "Yeni slaytlarda aynı terminolojiyi ve anlatım seviyesini koru, doğal bir "
-        "geçiş kur ve önceki slaytları tekrar üretme."
+        "geçiş kur ve önceki slaytları tekrar üretme. Yeni slaytların başlıkları yukarıdaki "
+        "sırada listelenen hiçbir başlıkla aynı ya da neredeyse aynı olmamalı — özellikle yeni "
+        "bir 'chapter' slaydı ekliyorsan, dersin genel adını ya da daha önce kullanılmış bir "
+        "başlığı tekrar kullanma, o an geçilen YENİ konuya özel bir başlık yaz."
     )
     return "\n".join(parts)
 

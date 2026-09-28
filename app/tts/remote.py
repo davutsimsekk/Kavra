@@ -179,8 +179,12 @@ class RemoteTTSClient:
         if cached:
             return cached
         if engine == "coqui":
-            if not voice or voice == "builtin:default":
-                built: tuple[dict, dict[str, Path]] = ({"kind": "builtin"}, {})
+            if not voice or voice.startswith("builtin:"):
+                speaker = voice[len("builtin:"):] if voice.startswith("builtin:") else "default"
+                spec = {"kind": "builtin"}
+                if speaker and speaker != "default":
+                    spec["speaker"] = speaker
+                built: tuple[dict, dict[str, Path]] = (spec, {})
             else:
                 path = Path(voice)
                 if not path.is_file():

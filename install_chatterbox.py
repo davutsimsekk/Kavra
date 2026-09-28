@@ -1,8 +1,10 @@
-"""Chatterbox Multilingual'i Coqui/Anka ortamını bozmadan kurar.
+"""Chatterbox Multilingual V3'ü Coqui/Anka ortamını bozmadan kurar.
 
 Kullanım: venv\\Scripts\\python.exe install_chatterbox.py
 
-Chatterbox 0.1.7, transformers 5.2.0 ister; Coqui ise 4.x ile sabitlidir.
+PyPI'daki Chatterbox 0.1.7 V3 seçimini içermediği için, V3'ü içeren resmî
+GitHub commit'i sabitlenmiştir. Chatterbox transformers 5.2.0 ister; Coqui ise
+4.x ile sabitlidir.
 Bu yüzden ``chatterbox_venv`` ana venv'in paketlerini yalnızca taban olarak
 görür ama Chatterbox'ın çakışan paketlerini kendi içine kurar.
 """
@@ -19,6 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "_cache"
 VENV = ROOT / "chatterbox_venv"
+CHATTERBOX_COMMIT = "5de7a54aa4e5e2baadb0182dde554908b48b85c2"
+CHATTERBOX_SOURCE = f"git+https://github.com/resemble-ai/chatterbox.git@{CHATTERBOX_COMMIT}"
 
 for key, value in {
     "TEMP": CACHE / "tmp",
@@ -68,7 +72,7 @@ steps = [
     [str(python), "-m", "pip", "install", "--upgrade", "-r", str(ROOT / "requirements-chatterbox.txt")],
     # Chatterbox bağımlılık çözümlemesi CPU Torch'u indirebilir; ortak CUDA
     # Torch yukarıda doğrulandığı için paketi bağımlılıkları çözmeden kuruyoruz.
-    [str(python), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", "chatterbox-tts==0.1.7"],
+    [str(python), "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", CHATTERBOX_SOURCE],
 ]
 for command in steps:
     print(">>>", " ".join(command))
@@ -77,11 +81,13 @@ for command in steps:
 subprocess.run(
     [
         str(python), "-c",
-        "import torch; assert torch.cuda.is_available(), 'CUDA kullanılamıyor'; "
+        "import inspect, torch; assert torch.cuda.is_available(), 'CUDA kullanılamıyor'; "
         "from chatterbox.mtl_tts import ChatterboxMultilingualTTS; "
-        "print(f'Chatterbox Multilingual GPU hazır: {torch.cuda.get_device_name(0)}')",
+        "assert 't3_model' in inspect.signature(ChatterboxMultilingualTTS.from_pretrained).parameters, "
+        "'Kurulan Chatterbox V3 seçimini desteklemiyor'; "
+        "print(f'Chatterbox Multilingual V3 GPU hazır: {torch.cuda.get_device_name(0)}')",
     ],
     check=True,
 )
-print(f"\nKurulum tamamlandı: {python}")
+print(f"\nKurulum tamamlandı: {python} (resmî commit {CHATTERBOX_COMMIT})")
 print("İlk karşılaştırma üretiminde model ağırlıkları _cache/hf altına indirilecektir.")

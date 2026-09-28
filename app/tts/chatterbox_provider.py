@@ -9,6 +9,7 @@ kullanılabilir.
 
 from __future__ import annotations
 
+import inspect
 import re
 import subprocess
 from pathlib import Path
@@ -22,6 +23,10 @@ from app.tts.base import TTSProvider
 
 CHATTERBOX_SPEAKERS_DIR = MODELS_DIR / "chatterbox_speakers"
 MAX_CHARS_PER_GENERATION = 220
+CHATTERBOX_T3_MODEL = "v3"
+CHATTERBOX_TEMPERATURE = 0.85
+CHATTERBOX_EXAGGERATION = 0.80
+CHATTERBOX_CFG_WEIGHT = 0.30
 CHATTERBOX_RECOMMENDED_MALE_REFERENCE_STEM = "Damien_Black"
 CHATTERBOX_RECOMMENDED_FEMALE_REFERENCE_STEM = "Claribel_Dervla"
 CHATTERBOX_FEMALE_REFERENCE_STEMS = {
@@ -117,7 +122,14 @@ class ChatterboxTTSProvider(TTSProvider):
                 "venv\\Scripts\\python.exe install_chatterbox.py komutuyla CUDA kurulumunu yenileyin."
             )
         self._torch = torch
-        self._model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
+        loader = ChatterboxMultilingualTTS.from_pretrained
+        if "t3_model" not in inspect.signature(loader).parameters:
+            raise RuntimeError(
+                "Kurulu Chatterbox Multilingual V3 seçimini desteklemiyor. "
+                "venv\\Scripts\\python.exe install_chatterbox.py komutuyla güncelleyin."
+            )
+        self._model = loader(device=self.device, t3_model=CHATTERBOX_T3_MODEL)
+        self._prepared_voice: str | None = None
 
     def list_voices(self) -> list[dict]:
         return list_chatterbox_voices()
@@ -126,13 +138,31 @@ class ChatterboxTTSProvider(TTSProvider):
         if not voice or voice == "builtin:default":
             raise ValueError("Chatterbox karşılaştırması için bir referans WAV dosyası gerekli.")
 
+        # Aynı worker bir ders boyunca çoğunlukla aynı sesi kullanır. Referans
+        # kodlamasını her slaytta tekrarlamak yerine ses değişene kadar bellekte
+        # tutuyoruz. V3 ve seçilen canlı anlatım ayarları uygulamanın gerçek
+        # render hattında da karşılaştırma demosuyla aynı kalır.
+        resolved_voice = str(Path(voice).resolve())
+        if self._prepared_voice != resolved_voice:
+            self._model.prepare_conditionals(
+                resolved_voice,
+                exaggeration=CHATTERBOX_EXAGGERATION,
+            )
+            self._prepared_voice = resolved_voice
+
         clips = []
         for part in _split_text(text):
             # Uzun bir slaytı tek üretimde vermek KV cache'in 8 GB VRAM'i
             # doldurmasına neden olur. Her cümle grubu bittikten sonra yalnızca
             # model belleği korunur; geçici üretim belleği GPU'dan bırakılır.
             with self._torch.inference_mode():
-                wav = self._model.generate(part, language_id="tr", audio_prompt_path=str(voice))
+                wav = self._model.generate(
+                    part,
+                    language_id="tr",
+                    temperature=CHATTERBOX_TEMPERATURE,
+                    exaggeration=CHATTERBOX_EXAGGERATION,
+                    cfg_weight=CHATTERBOX_CFG_WEIGHT,
+                )
             clips.append(wav.squeeze(0).detach().cpu().numpy())
             del wav
             if self.device.startswith("cuda"):

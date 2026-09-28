@@ -503,6 +503,162 @@ def regenerate_slide(project_id: str, index: int, payload: dict = Body(...), vid
     return {"jobId": jobs.create("regenerate", work)}
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/enrich-images/eligible-count")
+@app.get("/api/projects/{project_id}/enrich-images/eligible-count")
+def get_enrich_images_eligible_count(project_id: str, video_id: str | None = None, force: bool = False):
+    """Render'dan önce kullanıcıya kaç slaytta görsel aranacağını/üretileceğini
+    göstermek için — bkz. app.image_enrichment.eligible_for_enrichment. Gerçek
+    maliyet Gemini tarafından bildirilmediğinden (app/cost_ledger.py'deki ilke) burada
+    tahmini bir ücret DEĞİL, sadece istek sayısı gösterilir."""
+    from app.image_enrichment import eligible_for_enrichment
+
+    pdir = _workspace_dir(project_id, video_id)
+    slides = _slides_or_empty(pdir)
+    eligible_count = sum(1 for s in slides if eligible_for_enrichment(s, force))
+    return {"eligibleCount": eligible_count, "totalSlides": len(slides)}
+
+
+@app.post("/api/projects/{project_id}/videos/{video_id}/enrich-images")
+@app.post("/api/projects/{project_id}/enrich-images")
+def enrich_images(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    """Uygun slaytlara (bkz. app.image_enrichment.eligible_for_enrichment) önce
+    internetten gerçek bir görsel aratır, bulunamazsa yapay zeka ile bir illüstrasyon
+    ürettirir (bkz. app/image_enrichment.py modül docstring'i — model URL halüsine
+    edebilir, bu yüzden her indirilen görsel ayrıca doğrulanır). Ayrı, isteğe bağlı bir
+    iş: render akışını bloklamaz, kullanıcı kendi tetikler."""
+    pdir = _workspace_dir(project_id, video_id)
+    slides = _slides_or_empty(pdir)
+    if not slides:
+        raise HTTPException(404, "Slayt bulunamadı.")
+
+    force = bool(payload.get("force", False))
+    api_key = str(payload.get("apiKey", "")).strip() or get_api_key("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(400, "Görsel zenginleştirme için bir Gemini API anahtarı gerekli.")
+
+    def work(job_id: str):
+        from app.image_enrichment import enrich_slides_with_images, eligible_for_enrichment
+
+        current_slides = _slides_or_empty(pdir)
+        # "force" açıkken zaten görseli olan slaytlar da uygun sayılır (üzerine yazılır) —
+        # bu yüzden "eklendi" saymak için önce/sonra karşılaştırması değil, "denendi VE
+        # sonunda bir görseli var mı" bakılır (force'ta yol aynı kalıp içerik değişebilir,
+        # bir string karşılaştırması güvenilir olmazdı).
+        eligible_indices = [i for i, s in enumerate(current_slides) if eligible_for_enrichment(s, force)]
+
+        def on_progress(done: int, total: int, title: str) -> None:
+            jobs.update(
+                job_id, current=done, total=total, message=title,
+                progress=round(done / total * 100) if total else 0,
+            )
+
+        updated = enrich_slides_with_images(pdir, current_slides, api_key, force=force, progress_cb=on_progress)
+        added = [
+            {"index": i + 1, "title": updated[i].title, "source": updated[i].image_source}
+            for i in eligible_indices if updated[i].embedded_image
+        ]
+        return {
+            "slides": [slide.to_dict() for slide in updated],
+            "quality": load_or_analyze_quality(pdir, updated),
+            "assets": audit_assets(pdir, len(updated)),
+            "imagesAdded": added,
+            "attemptedCount": len(eligible_indices),
+        }
+
+    return {"jobId": jobs.create("enrichImages", work)}
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/vision-narrate/eligible-count")
+@app.get("/api/projects/{project_id}/vision-narrate/eligible-count")
+def get_vision_narrate_eligible_count(project_id: str, video_id: str | None = None):
+    """Sadece kaç sayfanın (bkz. app.vision_narration.eligible_sections) uygun olduğunu
+    gösterir — hangilerinin önbellekte olduğunu bilmek görüntüyü rasterize etmeyi
+    gerektirir, bu yüzden burada sayılmıyor (ucuz bir ön-kontrol kalsın diye)."""
+    from app.vision_narration import eligible_sections
+
+    pdir = _workspace_dir(project_id, video_id)
+    if not (pdir / "raw_sections.json").exists():
+        raise HTTPException(400, "Önce bir kaynak dosya ayrıştırılmalı.")
+    sections = load_raw_sections(pdir)
+    eligible = eligible_sections(pdir, sections)
+    return {"eligibleCount": len(eligible), "totalSections": len(sections)}
+
+
+@app.post("/api/projects/{project_id}/videos/{video_id}/vision-narrate")
+@app.post("/api/projects/{project_id}/vision-narrate")
+def vision_narrate(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    """PDF kaynağının sayfalarını GÖRÜNTÜ+METİN birlikte kullanarak yeniden anlatır
+    (bkz. app/vision_narration.py — normal metin-tabanlı üretimden ayrı, isteğe bağlı
+    bir mod). Mevcut slaytların TAMAMININ yerini alır — bu yüzden ayrı bir buton/onay
+    gerektirir, mevcut "AI ile üret" akışına sessizce karışmaz."""
+    pdir = _workspace_dir(project_id, video_id)
+    if not (pdir / "raw_sections.json").exists():
+        raise HTTPException(400, "Önce bir kaynak dosya ayrıştırılmalı.")
+    sections = load_raw_sections(pdir)
+
+    api_key = str(payload.get("apiKey", "")).strip() or get_api_key("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(400, "Görsel tabanlı anlatım için bir Gemini API anahtarı gerekli.")
+    style = str(payload.get("style", "")).strip()
+
+    def work(job_id: str):
+        from app.vision_narration import generate_slides_with_vision
+
+        def on_progress(done: int, total: int, title: str) -> None:
+            jobs.update(
+                job_id, current=done, total=total, message=title,
+                progress=round(done / total * 100) if total else 0,
+            )
+
+        try:
+            slides = generate_slides_with_vision(pdir, sections, api_key, style_note=style, progress_cb=on_progress)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if not slides:
+            raise RuntimeError("Görsel tabanlı anlatım için uygun sayfa bulunamadı (yalnızca PDF kaynaklar destekleniyor).")
+        snapshot_script(pdir, reason="before-vision-narrate")
+        save_script(pdir, slides)
+        return {
+            "slides": [slide.to_dict() for slide in slides],
+            "quality": load_or_analyze_quality(pdir, slides),
+            "assets": audit_assets(pdir, len(slides)),
+        }
+
+    return {"jobId": jobs.create("visionNarrate", work)}
+
+
+@app.post("/api/projects/{project_id}/videos/{video_id}/pronunciation/suggest")
+@app.post("/api/projects/{project_id}/pronunciation/suggest")
+def suggest_pronunciation_terms(project_id: str, payload: dict = Body(...), video_id: str | None = None):
+    """Bu projenin TÜM slaytlarının anlatım metnini tarayıp Türkçe TTS'in yanlış
+    okuyabileceği İngilizce/teknik terimleri ve önerilen fonetik yazımlarını döndürür
+    (bkz. app/pronunciation_scan.py). HİÇBİR ŞEY KAYDETMEZ — kullanıcı önerileri gözden
+    geçirip mevcut PUT /api/pronunciation ile onayladıklarını kaydeder."""
+    pdir = _workspace_dir(project_id, video_id)
+    slides = _slides_or_empty(pdir)
+    if not slides:
+        raise HTTPException(404, "Slayt bulunamadı.")
+
+    api_key = str(payload.get("apiKey", "")).strip() or get_api_key("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(400, "Telaffuz önerisi için bir Gemini API anahtarı gerekli.")
+    narrations = [s.narration for s in slides if (s.narration or "").strip()]
+
+    def work(job_id: str):
+        from app.pronunciation_scan import suggest_pronunciations
+
+        def on_progress(done: int, total: int) -> None:
+            jobs.update(
+                job_id, current=done, total=total, message=f"{done}/{total} grup taranıyor",
+                progress=round(done / total * 100) if total else 0,
+            )
+
+        suggestions = suggest_pronunciations(narrations, api_key, progress_cb=on_progress)
+        return {"suggestions": suggestions}
+
+    return {"jobId": jobs.create("pronunciationSuggest", work)}
+
+
 @app.get("/api/projects/{project_id}/videos/{video_id}/snapshots")
 @app.get("/api/projects/{project_id}/snapshots")
 def get_snapshots(project_id: str, video_id: str | None = None):
@@ -1093,6 +1249,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         subtitles=bool(payload.get("subtitles", True)),
         fade_transitions=bool(payload.get("fadeTransitions", True)),
         ken_burns=bool(payload.get("kenBurns", False)),
+        bullet_reveal=bool(payload.get("bulletReveal", False)),
         theme_preset=str(payload.get("theme", "auto")),
         coqui_parallel_workers=coqui_parallel_workers,
         chatterbox_parallel_workers=chatterbox_parallel_workers,
@@ -1107,6 +1264,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         "subtitles": options.subtitles,
         "fade_transitions": options.fade_transitions,
         "ken_burns": options.ken_burns,
+        "bullet_reveal": options.bullet_reveal,
         "theme_preset": options.theme_preset,
         "coqui_parallel_workers": options.coqui_parallel_workers,
         "chatterbox_parallel_workers": options.chatterbox_parallel_workers,

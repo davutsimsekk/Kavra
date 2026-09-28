@@ -244,7 +244,12 @@ def create_app(*, token: str, data_dir: Path, pools: dict[str, EnginePool],
         if kind == "builtin":
             if engine != "coqui":
                 raise HTTPException(400, "Yerleşik ses yalnızca coqui için geçerli.")
-            return "builtin:default"
+            speaker = str(voice.get("speaker", "")).strip()
+            if not speaker:
+                return "builtin:default"
+            if len(speaker) > 80 or any(ord(char) < 32 for char in speaker):
+                raise HTTPException(400, "Geçersiz yerleşik konuşmacı adı.")
+            return f"builtin:{speaker}"
         if kind != "assets":
             raise HTTPException(400, "Geçersiz ses tanımı.")
         files, primary = voice.get("files"), voice.get("primary")

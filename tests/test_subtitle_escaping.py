@@ -35,8 +35,13 @@ class AssEscapingTests(unittest.TestCase):
         self.assertTrue(dialogue)
         for line in dialogue:
             body = line.split(",", 9)[9]
-            self.assertNotRegex(re.sub(r"\\[{}]", "", body), r"[{}]")
-            self.assertNotRegex(body, r"\\[Nnh]")
+            # `{\kfNNN}` her kelimeden önce yazılan MEŞRU karaoke etiketleridir (bkz. _karaoke_line);
+            # kullanıcı içeriğinden gelen `{`/`}` ise bunların DIŞINDA hep `\{`/`\}` olarak kaçışlanmış
+            # olmalı. Önce meşru etiketlerin tamamını (süslü parantezleriyle birlikte), sonra
+            # kaçışlanmış süslü parantezleri çıkarınca geriye hiç çıplak `{`/`}` kalmamalı.
+            without_tags = re.sub(r"\{\\kf\d+\}", "", body)
+            self.assertNotRegex(re.sub(r"\\[{}]", "", without_tags), r"[{}]")
+            self.assertNotRegex(without_tags, r"\\[Nnh]")
 
 
 class VttEscapingTests(unittest.TestCase):

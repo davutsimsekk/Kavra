@@ -17,7 +17,8 @@ $TaskName = "KavraTTSServer"
 $Root = $PSScriptRoot
 $VbsPath = Join-Path $Root "run_tts_server_hidden.vbs"
 $LogPath = Join-Path $Root "_cache\tts_server.log"
-$TokenPath = Join-Path $Root "_cache\tts_server_token.txt"
+$TokenPath = Join-Path $Root "tts_server_token.txt"
+$AddressPath = Join-Path $Root "tts_server_address.txt"
 
 function Show-Status {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -34,6 +35,7 @@ function Show-Status {
         if ($code -eq 401) { Write-Host "Sunucu şu an CEVAP VERİYOR (401 beklenen — token yanlış verildi, bu normal)." }
         else { Write-Host "Sunucuya henüz ulaşılamıyor (birkaç saniye içinde açılıyor olabilir): $_" }
     }
+    if (Test-Path $AddressPath) { Write-Host "Adres: $(Get-Content $AddressPath -Raw)" }
     if (Test-Path $TokenPath) { Write-Host "Token: $(Get-Content $TokenPath -Raw)" }
     if (Test-Path $LogPath) { Write-Host "Son günlük satırları:"; Get-Content $LogPath -Tail 5 }
 }

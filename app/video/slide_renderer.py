@@ -1,5 +1,6 @@
 import io
 import os
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -187,10 +188,17 @@ def _draw_chapter(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
     _draw_progress(draw, theme, index, total, width, height)
 
 
+# Kart/adım panelinde okunaklı kalması için hem madde kartlarının (_draw_bullet_cards)
+# hem numaralı akışın (_draw_process_layout, çağıran yerde uygulanır) gösterdiği azami
+# öğe sayısı — app.quality_gate bu sınırı aşan içeriğin render'da SESSİZCE kırpılacağını
+# render'dan ÖNCE uyarabilmek için bu sabiti aynen içe aktarır (bkz. o modüldeki yorum).
+MAX_VISIBLE_BULLET_CARDS = 6
+
+
 def _draw_bullet_cards(draw: ImageDraw.ImageDraw, bullets: list[str], box,
                        theme: ThemePreset, compact: bool):
     x1, y1, x2, y2 = box
-    items = bullets[:6]
+    items = bullets[:MAX_VISIBLE_BULLET_CARDS]
     if not items:
         items = ["Bu bölümün temel fikirleri anlatımla birlikte ele alınacak."]
     gap = 14
@@ -236,6 +244,338 @@ def _draw_bullet_cards(draw: ImageDraw.ImageDraw, bullets: list[str], box,
         y = card_bottom + gap
 
 
+# LLM'in "layout" alanına yazabileceği, içerik formatına göre pedagojik olarak farklı bir
+# görsel üreten değerler — bkz. app/models.py Slide.layout ve prompts/lecture_script_prompt.md.
+# Tanınmayan/eksik bir değer "bullets"a düşer (bkz. _draw_topic'in sonundaki dispatch).
+_CONTENT_LAYOUTS = {"bullets", "emphasis", "definition", "comparison", "process", "formula", "callout"}
+
+
+def _draw_emphasis_text(draw: ImageDraw.ImageDraw, text: str, box, theme: ThemePreset):
+    """"emphasis" layout: madde madde bölünmesi zorlama olan tek bir kavramsal cümleyi
+    büyük ve ortalanmış gösterir (alıntı/quote kartı gibi), numaralı liste yok."""
+    x1, y1, x2, y2 = box
+    box_w = x2 - x1
+    size = 56 if len(text) < 60 else 46 if len(text) < 110 else 38
+    font = _font(FONT_TITLE, size)
+    max_width = box_w - 160
+    lines = _wrap_text(draw, text, font, max_width)[:4]
+    line_h = size + 16
+    block_h = len(lines) * line_h
+    start_y = y1 + max((y2 - y1 - block_h) // 2, 0)
+    for i, line in enumerate(lines):
+        line = _ellipsize(draw, line, font, max_width)
+        line_w = draw.textlength(line, font=font)
+        draw.text(((x1 + x2 - line_w) / 2, start_y + i * line_h), line, font=font, fill=theme.title)
+    rule_w = 96
+    rule_y = min(start_y + block_h + 28, y2 - 10)
+    rule_x = (x1 + x2 - rule_w) // 2
+    draw.rounded_rectangle((rule_x, rule_y, rule_x + rule_w, rule_y + 6), radius=3, fill=theme.accent)
+
+
+def _parse_definition_pairs(bullets: list[str]) -> list[tuple[str, str]] | None:
+    """"definition" layout'un beklediği "Terim: Tanım" yapısını doğrular. LLM formatı
+    tutturamazsa (kolon yok, boş terim/tanım, 3'ten fazla öğe) None döner — çağıran yer
+    bunu "bullets" formatına düşmesi gerektiğinin sinyali olarak kullanır."""
+    if not bullets or len(bullets) > 3:
+        return None
+    pairs = []
+    for item in bullets:
+        if ":" not in item:
+            return None
+        term, definition = item.split(":", 1)
+        term, definition = term.strip(), definition.strip()
+        if not term or not definition:
+            return None
+        pairs.append((term, definition))
+    return pairs
+
+
+def _draw_definition_layout(draw: ImageDraw.ImageDraw, pairs: list[tuple[str, str]], box, theme: ThemePreset):
+    x1, y1, x2, y2 = box
+    available_h = y2 - y1
+    row_h = available_h / len(pairs)
+    term_font = _font(FONT_TITLE, 40 if len(pairs) == 1 else 32)
+    def_font = _font(FONT_BODY, 28 if len(pairs) == 1 else 25)
+    max_width = x2 - x1 - 40
+    for i, (term, definition) in enumerate(pairs):
+        term_lines = _wrap_text(draw, term, term_font, max_width)[:1]
+        def_lines = _wrap_text(draw, definition, def_font, max_width)[:3]
+        block_h = len(term_lines) * (term_font.size + 6) + 10 + len(def_lines) * (def_font.size + 8)
+        row_top = y1 + row_h * i
+        ty = row_top + max((row_h - block_h) / 2, 0)
+        for line in term_lines:
+            draw.text((x1 + 20, ty), line, font=term_font, fill=theme.accent)
+            ty += term_font.size + 6
+        ty += 10
+        for line in def_lines:
+            line = _ellipsize(draw, line, def_font, max_width)
+            draw.text((x1 + 20, ty), line, font=def_font, fill=theme.body)
+            ty += def_font.size + 8
+        if i < len(pairs) - 1:
+            divider_y = row_top + row_h - 14
+            draw.line((x1 + 20, divider_y, x2 - 20, divider_y), fill=theme.border, width=1)
+
+
+def _draw_formula_layout(draw: ImageDraw.ImageDraw, formula: str, explanation: str, box, theme: ThemePreset):
+    """"formula" layout: bir matematik/kod ifadesini monospace fontla büyük ve ortalanmış
+    gösterir (accent renkte, "bu bir ifade" hissi versin diye), altında kısa bir açıklama."""
+    x1, y1, x2, y2 = box
+    max_width = (x2 - x1) - 160
+    formula_size = 64 if len(formula) < 30 else 50 if len(formula) < 60 else 40
+    formula_font = _font(FONT_CODE, formula_size)
+    formula_lines = _wrap_text(draw, formula, formula_font, max_width)[:2]
+
+    explanation_font = _font(FONT_BODY, 28)
+    explanation_lines = _wrap_text(draw, explanation, explanation_font, max_width)[:3] if explanation else []
+
+    formula_block_h = len(formula_lines) * (formula_size + 14)
+    explanation_block_h = (24 + len(explanation_lines) * (explanation_font.size + 10)) if explanation_lines else 0
+    start_y = y1 + max((y2 - y1 - formula_block_h - explanation_block_h) // 2, 0)
+
+    ty = start_y
+    for line in formula_lines:
+        line = _ellipsize(draw, line, formula_font, max_width)
+        line_w = draw.textlength(line, font=formula_font)
+        draw.text(((x1 + x2 - line_w) / 2, ty), line, font=formula_font, fill=theme.accent)
+        ty += formula_size + 14
+    if explanation_lines:
+        ty += 24
+        for line in explanation_lines:
+            line = _ellipsize(draw, line, explanation_font, max_width)
+            line_w = draw.textlength(line, font=explanation_font)
+            draw.text(((x1 + x2 - line_w) / 2, ty), line, font=explanation_font, fill=theme.body)
+            ty += explanation_font.size + 10
+
+
+_CALLOUT_WARNING_LABELS = {"UYARI", "DİKKAT", "TEHLİKE"}
+_CALLOUT_TIP_LABELS = {"İPUCU", "TAVSİYE", "ÖNERİ"}
+# Uyarı rengi kasıtlı olarak temadan bağımsız sabit bir kırmızı: "dikkat" evrensel bir
+# sinyal olmalı, koyu/açık her temada aynı aciliyeti taşımalı.
+_CALLOUT_WARNING_COLOR = (196, 68, 68)
+
+
+def _callout_style(label: str, theme: ThemePreset) -> tuple[tuple[int, int, int], str]:
+    upper = label.strip().upper()
+    if upper in _CALLOUT_WARNING_LABELS:
+        return _CALLOUT_WARNING_COLOR, "!"
+    if upper in _CALLOUT_TIP_LABELS:
+        return theme.accent_alt, "i"
+    return theme.accent, "i"
+
+
+def _draw_callout_layout(draw: ImageDraw.ImageDraw, label: str, message: str, box, theme: ThemePreset):
+    """"callout" layout: "UYARI:"/"İPUCU:"/"NOT:" gibi bir etiketle gelen tek bir notu, sol
+    kenarı renkli, ikonlu bir kutu içinde vurgular — gerçek bir hocanın "dikkat, burada
+    şuna dikkat edin" dediği anları düz madde listesinden ayırt eder."""
+    x1, y1, x2, y2 = box
+    color, icon = _callout_style(label, theme)
+    label_font = _font(FONT_TITLE, 26)
+    msg_font = _font(FONT_BODY, 30)
+    icon_font = _font(FONT_TITLE, 26)
+
+    card_x1, card_x2 = x1 + 20, x2 - 20
+    text_x = card_x1 + 60 + 44
+    max_width = card_x2 - 30 - text_x
+    msg_lines = _wrap_text(draw, message, msg_font, max_width)[:5]
+
+    card_h = max(140, 30 + label_font.size + 14 + len(msg_lines) * (msg_font.size + 10) + 20)
+    card_top = y1 + max((y2 - y1 - card_h) // 2, 0)
+    card_box = (card_x1, card_top, card_x2, card_top + card_h)
+
+    tint = _mix(color, theme.surface_alt, 0.82)
+    draw.rounded_rectangle(card_box, radius=20, fill=tint, outline=color, width=2)
+    draw.rounded_rectangle((card_x1, card_top, card_x1 + 8, card_top + card_h), radius=4, fill=color)
+
+    icon_cx, icon_cy = card_x1 + 60, card_top + 46
+    draw.ellipse((icon_cx - 20, icon_cy - 20, icon_cx + 20, icon_cy + 20), fill=color)
+    iw = draw.textlength(icon, font=icon_font)
+    draw.text((icon_cx - iw / 2, icon_cy - icon_font.size / 2 - 2), icon, font=icon_font, fill=(255, 255, 255))
+
+    draw.text((text_x, card_top + 30), label.strip().upper(), font=label_font, fill=color)
+    ty = card_top + 30 + label_font.size + 14
+    for line in msg_lines:
+        line = _ellipsize(draw, line, msg_font, max_width)
+        draw.text((text_x, ty), line, font=msg_font, fill=theme.body)
+        ty += msg_font.size + 10
+
+
+def _parse_comparison_columns(bullets: list[str]) -> tuple[list[str], list[str]] | None:
+    """"comparison" layout'un beklediği iki-sütun yapısını ayırır: LLM tam olarak "---"
+    içeren TEK bir öğeyle iki tarafı ayırmış olmalı, her iki tarafta da en az bir öğe
+    (sütun başlığı) bulunmalı. Uymuyorsa None -> "bullets"a düşülür."""
+    if bullets.count("---") != 1:
+        return None
+    idx = bullets.index("---")
+    left, right = bullets[:idx], bullets[idx + 1:]
+    if not left or not right:
+        return None
+    return left, right
+
+
+def _draw_comparison_layout(draw: ImageDraw.ImageDraw, left: list[str], right: list[str],
+                            box, theme: ThemePreset):
+    x1, y1, x2, y2 = box
+    mid = (x1 + x2) // 2
+    gap = 24
+    header_font = _font(FONT_TITLE, 30)
+    point_font = _font(FONT_BODY, 25)
+    draw.line((mid, y1 + 8, mid, y2 - 8), fill=theme.border, width=2)
+
+    def _column(items: list[str], cx1: int, cx2: int, accent: tuple[int, int, int]):
+        header, *points = items
+        max_width = cx2 - cx1 - 20
+        header_lines = _wrap_text(draw, header, header_font, max_width)[:2]
+        point_lines = [
+            _wrap_text(draw, f"•  {point}", point_font, max_width)[:2] for point in points[:5]
+        ]
+        block_h = len(header_lines) * (header_font.size + 8) + 12 + \
+            sum(len(lines) * (point_font.size + 10) for lines in point_lines)
+        y = y1 + max((y2 - y1 - block_h) // 2, 8)
+        for line in header_lines:
+            line = _ellipsize(draw, line, header_font, max_width)
+            draw.text((cx1 + 10, y), line, font=header_font, fill=accent)
+            y += header_font.size + 8
+        y += 12
+        for lines in point_lines:
+            for line in lines:
+                line = _ellipsize(draw, line, point_font, max_width)
+                draw.text((cx1 + 10, y), line, font=point_font, fill=theme.body)
+                y += point_font.size + 10
+
+    _column(left, x1, mid - gap, theme.accent)
+    _column(right, mid + gap, x2, theme.accent_alt)
+
+
+_LEADING_ORDINAL_RE = re.compile(r"^\s*\d+\s*[.)\-]\s+")
+
+
+def _strip_leading_ordinal(text: str) -> str:
+    """LLM prompt'a uymayıp adımın başına kendi numarasını da yazarsa ("1. Şunu yap"),
+    _draw_process_layout zaten kendi numaralı düğümünü çizdiğinden çift numaralanma
+    ("① 1. Şunu yap") olmasın diye bu öneki temizler."""
+    return _LEADING_ORDINAL_RE.sub("", text, count=1)
+
+
+def _draw_process_layout(draw: ImageDraw.ImageDraw, steps: list[str], box, theme: ThemePreset):
+    """"process" layout: bullet kartları yerine numaralı düğümleri dikey bir çizgiyle
+    birbirine bağlayan bir zaman çizelgesi/akış görünümü — sıralı bir prosedürü bir liste
+    gibi değil bir AKIŞ gibi hissettirir."""
+    x1, y1, x2, y2 = box
+    n = len(steps)
+    row_h = (y2 - y1) / n
+    node_x = x1 + 30
+    node_r = 22
+    step_font = _font(FONT_BODY, 27 if n <= 4 else 24)
+    number_font = _font(FONT_TITLE, 20)
+    text_x = node_x + node_r + 34
+    max_width = x2 - text_x - 20
+
+    if n > 1:
+        draw.line((node_x, y1 + row_h / 2, node_x, y2 - row_h / 2), fill=theme.border, width=3)
+
+    for i, step in enumerate(steps):
+        cy = y1 + row_h * i + row_h / 2
+        draw.ellipse((node_x - node_r, cy - node_r, node_x + node_r, cy + node_r), fill=theme.accent)
+        num = str(i + 1)
+        nw = draw.textlength(num, font=number_font)
+        draw.text((node_x - nw / 2, cy - number_font.size / 2 - 2), num, font=number_font, fill=(255, 255, 255))
+        lines = _wrap_text(draw, _strip_leading_ordinal(step), step_font, max_width)[:2]
+        ty = cy - len(lines) * (step_font.size + 6) / 2
+        for line in lines:
+            line = _ellipsize(draw, line, step_font, max_width)
+            draw.text((text_x, ty), line, font=step_font, fill=theme.body)
+            ty += step_font.size + 6
+
+
+def _draw_code_output_layout(img: Image.Image, draw: ImageDraw.ImageDraw, code: str, output_text: str,
+                             area, theme: ThemePreset, label_font):
+    """"code_output" layout: kod solda, o kodun ürettiği terminal/konsol çıktısı sağda —
+    "bu kodu çalıştırırsan bunu görürsün" öğretim deseni. Terminal paneli kasıtlı olarak
+    temadan bağımsız koyu/yeşil renklendirilir (evrensel terminal görünümü)."""
+    x1, y1, x2, y2 = area
+    divider_x = int(x1 + (x2 - x1) * 0.52)
+    gap = 24
+    draw.text((x1, y1 - 40), "KOD", font=label_font, fill=theme.accent)
+    draw.text((divider_x + gap, y1 - 40), "ÇIKTI", font=label_font, fill=theme.accent)
+
+    code_w = divider_x - gap - x1
+    code_img = render_code_image(code, code_w, y2 - y1, theme.code_style)
+    img.paste(code_img, (x1 + (code_w - code_img.width) // 2, y1 + (y2 - y1 - code_img.height) // 2))
+
+    term_box = (divider_x + gap, y1, x2, y2)
+    draw.rounded_rectangle(term_box, radius=18, fill=(24, 26, 32))
+    term_font = _font(FONT_CODE, 25)
+    pad = 28
+    max_width = (x2 - pad) - (divider_x + gap + pad)
+    lines = []
+    for paragraph in (output_text.splitlines() or [""]):
+        lines.extend(_wrap_text(draw, paragraph, term_font, max_width) or [""])
+    lines = lines[:10]
+    block_h = len(lines) * (term_font.size + 10)
+    ty = y1 + max(((y2 - y1) - block_h) // 2, pad)
+    for line in lines:
+        line = _ellipsize(draw, line, term_font, max_width)
+        draw.text((divider_x + gap + pad, ty), line, font=term_font, fill=(150, 230, 170))
+        ty += term_font.size + 10
+
+
+def _draw_content_layout(draw: ImageDraw.ImageDraw, slide: Slide, x1: int, x2: int,
+                         content_top: int, content_bottom: int, theme: ThemePreset, label_font,
+                         compact: bool = False):
+    """Metin formatlarının (bullets/emphasis/definition/comparison/process/formula/callout)
+    ortak dispatch'i — hem tam genişlikte (kod/görsel yokken, ya da görsel ALT şeritte iken —
+    bkz. _draw_topic'in "elif slide.embedded_image:" dalı) hem de kodla birlikte dar bir sol
+    panelde (bkz. _draw_topic'in "if slide.code:" dalı) çağrılabilir; `compact=True` SADECE
+    kod dalında verilir. "comparison" iki alt-sütun gerektirdiğinden dar panelde okunaksız
+    kalır — bu yüzden compact modda hiç denenmez, doğrudan madde listesine düşülür (görsel
+    dalı artık compact=False verdiğinden bu kısıtlama görsel için geçerli DEĞİL).
+    Tanınmayan bir "layout" değeri ya da o formatın beklediği yapıya uymayan içerik her zaman
+    güvenli varsayılan olan madde listesine düşer, render asla bu yüzden kırılmaz."""
+    layout = slide.layout if slide.layout in _CONTENT_LAYOUTS else "bullets"
+    box = (x1, content_top + 72, x2, content_bottom - 34)
+    rendered = False
+
+    if layout == "emphasis" and len(slide.bullets) == 1:
+        _draw_emphasis_text(draw, slide.bullets[0], (x1, content_top + 40, x2, content_bottom - 40), theme)
+        rendered = True
+    elif layout == "definition":
+        pairs = _parse_definition_pairs(slide.bullets)
+        if pairs:
+            draw.text((x1 + 6, content_top + 30), "TANIMLAR", font=label_font, fill=theme.accent)
+            _draw_definition_layout(draw, pairs, box, theme)
+            rendered = True
+    elif layout == "comparison" and not compact:
+        columns = _parse_comparison_columns(slide.bullets)
+        if columns:
+            draw.text((x1 + 6, content_top + 30), "KARŞILAŞTIRMA", font=label_font, fill=theme.accent)
+            _draw_comparison_layout(draw, columns[0], columns[1], box, theme)
+            rendered = True
+    elif layout == "process" and slide.bullets:
+        draw.text((x1 + 6, content_top + 30), "ADIMLAR", font=label_font, fill=theme.accent)
+        _draw_process_layout(draw, slide.bullets[:MAX_VISIBLE_BULLET_CARDS], box, theme)
+        rendered = True
+    elif layout == "formula":
+        pairs = _parse_definition_pairs(slide.bullets)
+        if pairs and len(pairs) == 1:
+            draw.text((x1 + 6, content_top + 30), "FORMÜL", font=label_font, fill=theme.accent)
+            _draw_formula_layout(draw, pairs[0][0], pairs[0][1], box, theme)
+            rendered = True
+    elif layout == "callout":
+        pairs = _parse_definition_pairs(slide.bullets)
+        if pairs and len(pairs) == 1:
+            _draw_callout_layout(draw, pairs[0][0], pairs[0][1], box, theme)
+            rendered = True
+
+    if not rendered:
+        # "---" yalnızca "comparison"ın sütun ayracı olarak anlamlıdır (bkz.
+        # _parse_comparison_columns); comparison denenmediği (compact mod) ya da
+        # başarısız olduğu durumlarda düz madde listesine düşerken bu öğe süzülmezse
+        # ekranda anlamsız, çıplak bir "---" kartı olarak görünür.
+        clean_bullets = [b for b in slide.bullets if b.strip() != "---"]
+        draw.text((x1 + 6, content_top + 30), "ANA FİKİRLER", font=label_font, fill=theme.accent)
+        _draw_bullet_cards(draw, clean_bullets, box, theme, compact=compact)
+
+
 def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
                 index: int, total: int, breadcrumb: str, theme: ThemePreset):
     width, height = img.size
@@ -271,60 +611,76 @@ def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
     )
 
     if slide.code:
-        divider_x = int(width * 0.49)
-        draw.line(
-            (divider_x, content_top + 42, divider_x, content_bottom - 42),
-            fill=theme.border, width=2,
-        )
-        _draw_bullet_cards(
-            draw, slide.bullets,
-            (106, content_top + 72, divider_x - 34, content_bottom - 34),
-            theme, compact=True,
-        )
+        if slide.layout == "code_output" and slide.bullets:
+            _draw_code_output_layout(
+                img, draw, slide.code, slide.bullets[0],
+                (106, content_top + 76, width - 106, content_bottom - 36), theme, label_font,
+            )
+        else:
+            # Sol panelde madde listesi ZORUNLU değil — LLM'in seçtiği metin formatı (definition/
+            # callout/formula/process/emphasis) burada da denenir (bkz. _draw_content_layout),
+            # sadece "comparison" dar panelde okunaksız kalacağından denenmez. Bu, "tanım + kod
+            # örneği" gibi kodlama derslerinde çok doğal olan bir kombinasyonun eskiden olduğu
+            # gibi düz madde listesine zorlanmasını engeller.
+            divider_x = int(width * 0.49)
+            draw.line(
+                (divider_x, content_top + 42, divider_x, content_bottom - 42),
+                fill=theme.border, width=2,
+            )
+            _draw_content_layout(draw, slide, 106, divider_x - 34, content_top, content_bottom,
+                                 theme, label_font, compact=True)
 
-        draw.text(
-            (divider_x + 40, content_top + 30), "KOD ÖRNEĞİ",
-            font=label_font, fill=theme.accent,
-        )
-        code_area = (divider_x + 40, content_top + 76, width - 112, content_bottom - 36)
-        code_img = render_code_image(
-            slide.code,
-            code_area[2] - code_area[0],
-            code_area[3] - code_area[1],
-            theme.code_style,
-        )
-        code_x = code_area[0] + (code_area[2] - code_area[0] - code_img.width) // 2
-        code_y = code_area[1] + (code_area[3] - code_area[1] - code_img.height) // 2
-        img.paste(code_img, (code_x, code_y))
+            draw.text(
+                (divider_x + 40, content_top + 30), "KOD ÖRNEĞİ",
+                font=label_font, fill=theme.accent,
+            )
+            code_area = (divider_x + 40, content_top + 76, width - 112, content_bottom - 36)
+            code_img = render_code_image(
+                slide.code,
+                code_area[2] - code_area[0],
+                code_area[3] - code_area[1],
+                theme.code_style,
+            )
+            code_x = code_area[0] + (code_area[2] - code_area[0] - code_img.width) // 2
+            code_y = code_area[1] + (code_area[3] - code_area[1] - code_img.height) // 2
+            img.paste(code_img, (code_x, code_y))
     elif slide.embedded_image and Path(slide.embedded_image).exists():
-        # "Diyagram/görsel çıkar" modu: kod örneğiyle aynı ikiye-bölünmüş
-        # düzen, sağ tarafta kaynaktan çıkarılmış GERÇEK görsel var.
-        divider_x = int(width * 0.49)
-        draw.line(
-            (divider_x, content_top + 42, divider_x, content_bottom - 42),
-            fill=theme.border, width=2,
-        )
-        _draw_bullet_cards(
-            draw, slide.bullets,
-            (106, content_top + 72, divider_x - 34, content_bottom - 34),
-            theme, compact=True,
-        )
-        draw.text(
-            (divider_x + 40, content_top + 30), "KAYNAK GÖRSEL",
-            font=label_font, fill=theme.accent,
-        )
-        image_area = (divider_x + 40, content_top + 76, width - 112, content_bottom - 36)
+        # "Diyagram/görsel çıkar" modu (kaynaktan) VEYA app/image_enrichment.py
+        # (internetten bulunan/yapay zeka ile üretilen görsel) — görsel içeriğin ALTINA,
+        # tam genişlikli bir şerit olarak yerleştirilir (kod örneğindeki yan-yana bölünmüş
+        # düzenin AKSİNE — bkz. yukarıdaki "if slide.code:" dalı, o kasıtlı olarak
+        # değiştirilmedi, kod tam genişlik gerektirir). Bu sayede "comparison" gibi
+        # genişlik gerektiren formatlar görsel varken de TAM olarak render edilir —
+        # eskiden dar bir sol panelde hiç denenmiyordu (bkz. KAVRA_PROJECT_HANDOFF.md
+        # §10.0.15, gerçek bir kullanıcı videosunda bulunan içerik-kaybı bug'ı). Etiket,
+        # görselin NEREDEN geldiğine göre değişir (bkz. Slide.image_source) — kullanıcı
+        # bunun kaynağın kendi gerçek görseli mi, internetten bulunmuş bir fotoğraf mı,
+        # yoksa yapay zeka illüstrasyonu mu (dolayısıyla gerçeği birebir yansıtmayabilir)
+        # olduğunu görebilsin.
+        image_band_height = int((content_bottom - content_top) * 0.34)
+        image_top = content_bottom - image_band_height
+
+        draw.line((106, image_top - 10, width - 106, image_top - 10), fill=theme.border, width=2)
+        _draw_content_layout(draw, slide, 106, width - 106, content_top, image_top - 10,
+                             theme, label_font, compact=False)
+
+        image_label = {
+            "search": "İNTERNETTEN GÖRSEL",
+            "generated": "YAPAY ZEKA GÖRSELİ",
+        }.get(slide.image_source, "KAYNAK GÖRSEL")
+        draw.text((106, image_top + 6), image_label, font=label_font, fill=theme.accent)
+        label_h = label_font.size + 20
+        # Kare/dikey görsellerin çok ince, iki yanında büyük boşluklu görünmesini
+        # engellemek için genişliği de sınırlıyoruz — sadece gerçekten geniş (panoramik)
+        # görseller tam genişliği kullanır, kare/dikey olanlar bantın yüksekliğine göre
+        # doğal boyutunda ortalanmış kalır.
+        max_image_width = min(width - 212, int((image_band_height - label_h) * 2.6))
+        image_x1 = 106 + (width - 212 - max_image_width) // 2
+        image_area = (image_x1, image_top + label_h, image_x1 + max_image_width, content_bottom - 4)
         _paste_fitted_image(img, slide.embedded_image, image_area)
     else:
-        draw.text(
-            (112, content_top + 30), "ANA FİKİRLER",
-            font=label_font, fill=theme.accent,
-        )
-        _draw_bullet_cards(
-            draw, slide.bullets,
-            (106, content_top + 72, width - 106, content_bottom - 34),
-            theme, compact=False,
-        )
+        _draw_content_layout(draw, slide, 106, width - 106, content_top, content_bottom,
+                             theme, label_font, compact=False)
 
     _draw_progress(draw, theme, index, total, width, height)
 

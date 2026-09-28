@@ -15,10 +15,25 @@ Kendi bilgisayarın (render alırken) ── "Bu bilgisayar" ──────�
 Uzakta desteklenen motorlar: **XTTS v2 (coqui)** ve **Piper**. Chatterbox, Anka ve Edge/ElevenLabs bu
 özelliğin kapsamı dışındadır (Chatterbox ayrı ortam ister; Edge/ElevenLabs zaten bulut).
 
-## Bilgisayarını uzak GPU yap (kalıcı, önerilen)
+## Bilgisayarını uzak GPU yap
 
-Bilgisayarın açıkken Tailscale bağlıysa GPU'n hazır olsun istiyorsan sunucuyu Windows açılışında
-otomatik, görünmeden başlat:
+### Elle başlatma (varsayılan, taşınabilir/harici diskte tavsiye edilir)
+
+İhtiyacın olduğunda `run_tts_server.bat`'ı çift tıkla. Açılan pencerede **Token** ve **Adres**
+yazılıdır; ikisi de aynı klasördeki `tts_server_token.txt` / `tts_server_address.txt` dosyalarına
+da yazılır — VPS ayarlarına girerken bu iki dosyayı açıp kopyalayabilirsin. Token ilk çalıştırmada
+üretilir ve sonrasında hep aynı kalır; adres her çalıştırmada Tailscale'den yeniden tespit edilir
+(Tailscale kapalıysa/giriş yapılmamışsa "tespit edilemedi" der, eski dosyaya dokunmaz).
+Kullanmayı bitirince pencereyi kapatman yeterli.
+
+**Kavra klasörün taşınabilir/harici bir diskteyse (ör. D: harici HDD) elle başlatmayı tercih et.**
+Windows açılışında otomatik başlatma (aşağıda), Görev Zamanlayıcı diski henüz mount etmemişken
+tetiklenebilir ve sessizce başarısız olabilir — diskin her zaman bağlı olduğu bir makinede daha
+güvenilirdir.
+
+### Windows açılışında otomatik başlatma (isteğe bağlı)
+
+Kavra klasörün her zaman bağlı bir diskteyse ve pencereyi elle açmak istemiyorsan:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File install_tts_autostart.ps1
@@ -30,18 +45,18 @@ engellenebilir; script böyle bir durumda "KURULAMADI" diye açıkça söyler, s
 
 - Durum ve token: `powershell -ExecutionPolicy Bypass -File install_tts_autostart.ps1 -Status`
 - Kaldırmak için: `powershell -ExecutionPolicy Bypass -File install_tts_autostart.ps1 -Uninstall`
-- Elle, tek seferlik başlatmak için (otomatik başlatmadan bağımsız): `run_tts_server.bat`'ı çift tıkla.
+
+### İkisinde de
 
 Sunucu modelleri **ilk render isteğinde** yükler (`--no-preload`); boştayken VRAM'i işgal etmez, ilk
-render'da ~15-30 sn ekstra bekleme olur. Sonra bir kez, kalıcı olarak:
+render'da ~15-30 sn ekstra bekleme olur. Sonra bir kez, kalıcı olarak (Tailscale bağlıysa hep açık kalır):
 
 ```powershell
 tailscale serve --bg 8790
 ```
 
-Adres artık `https://BILGISAYAR-ADI.tailnet-adi.ts.net` — Tailscale bağlıyken sabit kalır, Colab
-oturumu gibi kopmaz. Token, `_cache/tts_server_token.txt` içinde saklanır ve sunucu yeniden
-başlasa da aynı kalır.
+Adres artık `tts_server_address.txt`'de yazan adres — Tailscale bağlıyken sabit kalır, Colab
+oturumu gibi kopmaz.
 
 **Not:** Bilgisayarını video render'ı için yerelde de kullanıyorsan aynı anda uzaktan da render
 isteği gelirse VRAM (8 GB) paylaşılır; 2 XTTS kopyası ~5-6 GB tutar. İkisini aynı anda yoğun

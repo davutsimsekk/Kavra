@@ -30,6 +30,16 @@ models/chatterbox_speakers/*
 /ses_ornekleri_erkek_xtts/
 /ses_ornekleri_kadin_xtts/
 
+# Yerel TTS dinleme laboratuvarı çıktıları ve lisansı ayrıca doğrulanması
+# gereken indirilen ses önizlemeleri sürüm kontrolüne girmez.
+/chatterbox_temperature_demo/
+/chatterbox_version_comparison/
+/tts_expressiveness_demo/
+/tts_expressiveness_demo_v3/
+/xtts_v2_vs_chatterbox_v3/
+/voice_preview_doga - upbeat and rich.mp3
+/models/chatterbox_speakers/Doga_Upbeat_Rich.wav
+
 # --- Kullanıcı verisi ve üretilen ders videoları ---
 projects/
 settings.json
