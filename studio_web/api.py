@@ -506,16 +506,21 @@ def regenerate_slide(project_id: str, index: int, payload: dict = Body(...), vid
 
 @app.get("/api/projects/{project_id}/videos/{video_id}/enrich-images/eligible-count")
 @app.get("/api/projects/{project_id}/enrich-images/eligible-count")
-def get_enrich_images_eligible_count(project_id: str, video_id: str | None = None, force: bool = False):
+def get_enrich_images_eligible_count(project_id: str, video_id: str | None = None,
+                                     force: bool = False, mode: str = "support"):
     """Render'dan önce kullanıcıya kaç slaytta görsel aranacağını/üretileceğini
     göstermek için — bkz. app.image_enrichment.eligible_for_enrichment. Gerçek
     maliyet Gemini tarafından bildirilmediğinden (app/cost_ledger.py'deki ilke) burada
     tahmini bir ücret DEĞİL, sadece istek sayısı gösterilir."""
-    from app.image_enrichment import eligible_for_enrichment
+    from app.image_enrichment import ENRICHMENT_MODES, eligible_for_background, eligible_for_enrichment
+
+    if mode not in ENRICHMENT_MODES:
+        raise HTTPException(400, "Görsel modu 'support' veya 'background' olmalı.")
 
     pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
-    eligible_count = sum(1 for s in slides if eligible_for_enrichment(s, force))
+    eligibility = eligible_for_background if mode == "background" else eligible_for_enrichment
+    eligible_count = sum(1 for s in slides if eligibility(s, force))
     return {"eligibleCount": eligible_count, "totalSlides": len(slides)}
 
 
@@ -532,20 +537,28 @@ def enrich_images(project_id: str, payload: dict = Body(...), video_id: str | No
     if not slides:
         raise HTTPException(404, "Slayt bulunamadı.")
 
+    from app.image_enrichment import ENRICHMENT_MODES
+
+    mode = str(payload.get("mode", "support")).strip().lower()
+    if mode not in ENRICHMENT_MODES:
+        raise HTTPException(400, "Görsel modu 'support' veya 'background' olmalı.")
     force = bool(payload.get("force", False))
     api_key = str(payload.get("apiKey", "")).strip() or get_api_key("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(400, "Görsel zenginleştirme için bir Gemini API anahtarı gerekli.")
 
     def work(job_id: str):
-        from app.image_enrichment import enrich_slides_with_images, eligible_for_enrichment
+        from app.image_enrichment import (
+            eligible_for_background, eligible_for_enrichment, enrich_slides_with_images,
+        )
 
         current_slides = _slides_or_empty(pdir)
         # "force" açıkken zaten görseli olan slaytlar da uygun sayılır (üzerine yazılır) —
         # bu yüzden "eklendi" saymak için önce/sonra karşılaştırması değil, "denendi VE
         # sonunda bir görseli var mı" bakılır (force'ta yol aynı kalıp içerik değişebilir,
         # bir string karşılaştırması güvenilir olmazdı).
-        eligible_indices = [i for i, s in enumerate(current_slides) if eligible_for_enrichment(s, force)]
+        eligibility = eligible_for_background if mode == "background" else eligible_for_enrichment
+        eligible_indices = [i for i, s in enumerate(current_slides) if eligibility(s, force)]
 
         def on_progress(done: int, total: int, title: str) -> None:
             jobs.update(
@@ -553,10 +566,20 @@ def enrich_images(project_id: str, payload: dict = Body(...), video_id: str | No
                 progress=round(done / total * 100) if total else 0,
             )
 
-        updated = enrich_slides_with_images(pdir, current_slides, api_key, force=force, progress_cb=on_progress)
+        enrich_kwargs = {"force": force, "progress_cb": on_progress}
+        # Varsayılan destek-görsel çağrısının eski eklentiler/test doubles ile imzası
+        # değişmesin; yeni anahtar yalnızca gerçekten arka plan istendiğinde gönderilir.
+        if mode == "background":
+            enrich_kwargs["mode"] = mode
+        updated = enrich_slides_with_images(pdir, current_slides, api_key, **enrich_kwargs)
         added = [
-            {"index": i + 1, "title": updated[i].title, "source": updated[i].image_source}
-            for i in eligible_indices if updated[i].embedded_image
+            {
+                "index": i + 1,
+                "title": updated[i].title,
+                "source": "generated" if mode == "background" else updated[i].image_source,
+            }
+            for i in eligible_indices
+            if (updated[i].ai_background_image if mode == "background" else updated[i].embedded_image)
         ]
         return {
             "slides": [slide.to_dict() for slide in updated],
@@ -564,6 +587,7 @@ def enrich_images(project_id: str, payload: dict = Body(...), video_id: str | No
             "assets": audit_assets(pdir, len(updated)),
             "imagesAdded": added,
             "attemptedCount": len(eligible_indices),
+            "mode": mode,
         }
 
     return {"jobId": jobs.create("enrichImages", work)}

@@ -56,10 +56,15 @@ class Slide:
     # yolu. Doluysa render_slide bizim temamızı çizmek yerine bu görüntüyü
     # olduğu gibi (letterbox'lanmış) kullanır.
     background_image: str | None = None
+    # Yapay zeka ile üretilen, tema ve metin katmanlarının ARKASINDA kullanılan
+    # dekoratif arka plan. `background_image` kaynak sayfasını olduğu gibi gösterip
+    # normal slayt çizimini atlar; bu alan ise tam tersine mevcut düzeni korur ve
+    # renderer tarafından okunabilir bir renk perdesiyle yumuşatılır.
+    ai_background_image: str | None = None
     # "Diyagram/görsel çıkar" modunda: kaynak sayfadan çıkarılmış GERÇEK
-    # (üretilmemiş) bir görselin yolu. Doluysa render_slide, kod örneği
-    # düzenindeki gibi içerik panelini ikiye bölüp maddeleri sola, bu görseli
-    # sağa yerleştirir — background_image'in aksine tema tasarımı korunur.
+    # (üretilmemiş) bir görselin yolu. Doluysa render_slide dar içerik
+    # düzenlerinde sağ sütuna, geniş içerik düzenlerinde alt banda yerleştirir —
+    # background_image'in aksine tema tasarımı korunur.
     embedded_image: str | None = None
     # embedded_image'in NEREDEN geldiği — sadece render'da doğru etiketi (ör. "KAYNAK
     # GÖRSEL" / "İNTERNETTEN GÖRSEL" / "YAPAY ZEKA GÖRSELİ") seçmek için kullanılır,
@@ -81,6 +86,7 @@ class Slide:
             "sourceTitles": self.source_titles,
             "manuallyEdited": self.manually_edited,
             "backgroundImage": self.background_image,
+            "aiBackgroundImage": self.ai_background_image,
             "embeddedImage": self.embedded_image,
             "imageSource": self.image_source,
         }
@@ -98,6 +104,7 @@ class Slide:
             source_titles=list(d.get("sourceTitles", []) or []),
             manually_edited=bool(d.get("manuallyEdited", False)),
             background_image=d.get("backgroundImage"),
+            ai_background_image=d.get("aiBackgroundImage"),
             embedded_image=d.get("embeddedImage"),
             image_source=d.get("imageSource"),
         )

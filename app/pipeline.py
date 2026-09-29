@@ -170,10 +170,12 @@ def _renderable_signature(slide: Slide) -> dict:
         "bullets": slide.bullets,
         "layout": slide.layout,
         "code": slide.code,
-        # background_image/embedded_image DİĞER metadata alanlarından farklı:
+        # background_image/ai_background_image/embedded_image DİĞER metadata
+        # alanlarından farklı:
         # gerçekten render edilen görüntüyü değiştiriyor (sayfa modu / diyagram
         # çıkarma), o yüzden kasıtlı olarak dahil.
         "background_image": slide.background_image,
+        "ai_background_image": slide.ai_background_image,
         "embedded_image": slide.embedded_image,
         # Görselin kendisini değiştirmez ama render'daki etiketi değiştirir (bkz.
         # app/video/slide_renderer.py "İNTERNETTEN GÖRSEL"/"YAPAY ZEKA GÖRSELİ" ayrımı).

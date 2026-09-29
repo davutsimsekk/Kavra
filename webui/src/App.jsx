@@ -830,17 +830,24 @@ export default function App() {
             } : current)
             const added = job.result.imagesAdded || []
             const attempted = job.result.attemptedCount ?? added.length
+            const backgroundMode = job.result.mode === 'background'
             let text
             if (!attempted) {
-              text = 'Görsel eklemeye uygun slayt bulunamadı.'
+              text = backgroundMode ? 'AI arka planına uygun slayt bulunamadı.' : 'Görsel eklemeye uygun slayt bulunamadı.'
             } else if (!added.length) {
-              text = `${attempted} slaytta görsel aranıp üretilmeye çalışıldı ama hiçbiri başarılı olmadı.`
+              text = backgroundMode
+                ? `${attempted} slayt için AI arka planı üretilmeye çalışıldı ama hiçbiri başarılı olmadı.`
+                : `${attempted} slaytta görsel aranıp üretilmeye çalışıldı ama hiçbiri başarılı olmadı.`
             } else {
-              const searchCount = added.filter((a) => a.source === 'search').length
-              const generatedCount = added.filter((a) => a.source === 'generated').length
               const shown = added.slice(0, 8).map((a) => a.index).join(', ')
               const rest = added.length > 8 ? ` +${added.length - 8} diğer` : ''
-              text = `${added.length}/${attempted} slayta görsel eklendi (${searchCount} internetten, ${generatedCount} yapay zeka ile) — Slayt ${shown}${rest}.`
+              if (backgroundMode) {
+                text = `${added.length}/${attempted} slayta okunabilirlik perdesiyle AI arka planı eklendi — Slayt ${shown}${rest}.`
+              } else {
+                const searchCount = added.filter((a) => a.source === 'search').length
+                const generatedCount = added.filter((a) => a.source === 'generated').length
+                text = `${added.length}/${attempted} slayta görsel eklendi (${searchCount} internetten, ${generatedCount} yapay zeka ile) — Slayt ${shown}${rest}.`
+              }
             }
             setToast({ type: 'success', text })
           } else if (activeJob.type === 'visionNarrate') {
@@ -1130,21 +1137,27 @@ export default function App() {
     }
   }
 
-  const enrichImages = async () => {
+  const enrichImages = async (mode = 'support') => {
     if (!project?.slides.length || activeJob) return
     try {
-      const { eligibleCount, totalSlides } = await api(`${apiBase}/enrich-images/eligible-count`)
+      const backgroundMode = mode === 'background'
+      const { eligibleCount, totalSlides } = await api(`${apiBase}/enrich-images/eligible-count?mode=${mode}`)
       if (!eligibleCount) {
-        setToast({ type: 'success', text: 'Görsel eklenecek uygun slayt yok (bölüm kapakları, kod örnekli slaytlar ve zaten görseli olan slaytlar hariç tutulur).' })
+        setToast({ type: 'success', text: backgroundMode
+          ? 'AI arka planı eklenecek uygun slayt yok (kod, kaynak sayfası veya destek görseli olan slaytlar hariç tutulur).'
+          : 'Görsel eklenecek uygun slayt yok (bölüm kapakları, kod örnekli slaytlar ve zaten görseli olan slaytlar hariç tutulur).' })
         return
       }
-      if (!window.confirm(`${eligibleCount}/${totalSlides} slaytta önce internetten gerçek bir görsel aranacak, bulunamazsa yapay zeka ile bir illüstrasyon üretilecek. Bu, Gemini API'na gerçek istekler gönderir. Devam edilsin mi?`)) return
-      setJobState({ status: 'queued', progress: 0, message: 'Görsel zenginleştirme hazırlanıyor' })
+      const confirmation = backgroundMode
+        ? `${eligibleCount}/${totalSlides} slayt için 16:9 yapay zeka arka planı üretilecek. Metin okunabilirliği otomatik renk perdesiyle korunur. Bu, Gemini API'na gerçek istekler gönderir. Devam edilsin mi?`
+        : `${eligibleCount}/${totalSlides} slaytta önce internetten gerçek bir görsel aranacak, bulunamazsa yapay zeka ile bir illüstrasyon üretilecek. Bu, Gemini API'na gerçek istekler gönderir. Devam edilsin mi?`
+      if (!window.confirm(confirmation)) return
+      setJobState({ status: 'queued', progress: 0, message: backgroundMode ? 'AI arka planları hazırlanıyor' : 'Görsel zenginleştirme hazırlanıyor' })
       const response = await api(`${apiBase}/enrich-images`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: visionApiKey.trim() }),
+        body: JSON.stringify({ apiKey: visionApiKey.trim(), mode }),
       })
-      rememberActiveJob({ id: response.jobId, type: 'enrichImages' }, { view: 'video', stage: 'script' })
+      rememberActiveJob({ id: response.jobId, type: 'enrichImages', mode }, { view: 'video', stage: 'script' })
     } catch (error) {
       setJobState(null)
       setToast({ type: 'error', text: error.message })
@@ -1446,10 +1459,15 @@ export default function App() {
         {!bootstrap.keysConfigured.gemini && (
           <label className="field"><span>Gemini API anahtarı</span><input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Gemini API anahtarın" /></label>
         )}
-        <div className="session-note wide"><ImageIcon size={14} /><span>Bölüm kapakları, kod örnekli slaytlar ve zaten görseli olan slaytlar atlanır. Eklenen görsel gerçek bir web sonucuysa "İnternetten görsel", değilse "Yapay zeka görseli" olarak etiketlenir — üretilen görsel gerçeği birebir yansıtmayabilir.</span></div>
-        <button className="button primary" onClick={enrichImages} disabled={!project?.slides.length || Boolean(activeJob)}>
-          <ImageIcon size={17} /> {activeJob?.type === 'enrichImages' ? 'Görsel aranıyor/üretiliyor…' : 'Uygun slaytlara görsel ekle'}
-        </button>
+        <div className="session-note wide"><ImageIcon size={14} /><span>Destek görselleri tanım, vurgu, formül ve çağrı slaytlarında boş kalan sağ sütuna; geniş düzenlerde içeriğin altına yerleşir. AI arka planı ise metnin arkasında kalır, otomatik yumuşatma ve renk perdesiyle yazı okunabilirliğini korur. Kod, kaynak sayfası veya destek görseli olan slaytlara arka plan eklenmez.</span></div>
+        <div className="image-enrichment-actions">
+          <button className="button primary" onClick={() => enrichImages('support')} disabled={!project?.slides.length || Boolean(activeJob)}>
+            <ImageIcon size={17} /> {activeJob?.type === 'enrichImages' && activeJob?.mode !== 'background' ? 'Görsel aranıyor/üretiliyor…' : 'Uygun slaytlara görsel ekle'}
+          </button>
+          <button className="button" onClick={() => enrichImages('background')} disabled={!project?.slides.length || Boolean(activeJob)}>
+            <WandSparkles size={17} /> {activeJob?.type === 'enrichImages' && activeJob?.mode === 'background' ? 'AI arka planları üretiliyor…' : 'AI arka planları oluştur'}
+          </button>
+        </div>
         <ProgressStrip job={activeJob?.type === 'enrichImages' || jobState?.kind === 'enrichImages' ? jobState : null} />
       </details>
 

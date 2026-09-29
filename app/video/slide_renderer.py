@@ -3,7 +3,7 @@ import os
 import re
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from pygments import highlight
 from pygments.formatters import ImageFormatter
 from pygments.lexers import CppLexer
@@ -577,7 +577,8 @@ def _draw_content_layout(draw: ImageDraw.ImageDraw, slide: Slide, x1: int, x2: i
 
 
 def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
-                index: int, total: int, breadcrumb: str, theme: ThemePreset):
+                index: int, total: int, breadcrumb: str, theme: ThemePreset,
+                has_ai_background: bool = False):
     width, height = img.size
     small_font = _font(FONT_SMALL, 25)
     title_font = _font(FONT_TITLE, 58 if len(slide.title) < 70 else 50)
@@ -607,7 +608,9 @@ def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
     content_bottom = height - 82
     _rounded_panel(
         draw, (76, content_top, width - 76, content_bottom),
-        theme.surface, theme.border, radius=34,
+        (*theme.surface, 204) if has_ai_background else theme.surface,
+        (*theme.border, 235) if has_ai_background else theme.border,
+        radius=34,
     )
 
     if slide.code:
@@ -646,38 +649,56 @@ def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
             img.paste(code_img, (code_x, code_y))
     elif slide.embedded_image and Path(slide.embedded_image).exists():
         # "Diyagram/görsel çıkar" modu (kaynaktan) VEYA app/image_enrichment.py
-        # (internetten bulunan/yapay zeka ile üretilen görsel) — görsel içeriğin ALTINA,
-        # tam genişlikli bir şerit olarak yerleştirilir (kod örneğindeki yan-yana bölünmüş
-        # düzenin AKSİNE — bkz. yukarıdaki "if slide.code:" dalı, o kasıtlı olarak
-        # değiştirilmedi, kod tam genişlik gerektirir). Bu sayede "comparison" gibi
-        # genişlik gerektiren formatlar görsel varken de TAM olarak render edilir —
-        # eskiden dar bir sol panelde hiç denenmiyordu (bkz. KAVRA_PROJECT_HANDOFF.md
-        # §10.0.15, gerçek bir kullanıcı videosunda bulunan içerik-kaybı bug'ı). Etiket,
+        # (internetten bulunan/yapay zeka ile üretilen görsel). Dar içerikli düzenlerde
+        # boş sağ sütunu kullanır; "comparison" gibi genişlik gerektiren formatlarda ise
+        # görsel ALT bantta kalır ve metin tam genişlikte render edilir (bkz.
+        # KAVRA_PROJECT_HANDOFF.md §10.0.15 ve §10.0.18). Etiket,
         # görselin NEREDEN geldiğine göre değişir (bkz. Slide.image_source) — kullanıcı
         # bunun kaynağın kendi gerçek görseli mi, internetten bulunmuş bir fotoğraf mı,
         # yoksa yapay zeka illüstrasyonu mu (dolayısıyla gerçeği birebir yansıtmayabilir)
         # olduğunu görebilsin.
-        image_band_height = int((content_bottom - content_top) * 0.34)
-        image_top = content_bottom - image_band_height
-
-        draw.line((106, image_top - 10, width - 106, image_top - 10), fill=theme.border, width=2)
-        _draw_content_layout(draw, slide, 106, width - 106, content_top, image_top - 10,
-                             theme, label_font, compact=False)
-
         image_label = {
             "search": "İNTERNETTEN GÖRSEL",
             "generated": "YAPAY ZEKA GÖRSELİ",
         }.get(slide.image_source, "KAYNAK GÖRSEL")
-        draw.text((106, image_top + 6), image_label, font=label_font, fill=theme.accent)
-        label_h = label_font.size + 20
-        # Kare/dikey görsellerin çok ince, iki yanında büyük boşluklu görünmesini
-        # engellemek için genişliği de sınırlıyoruz — sadece gerçekten geniş (panoramik)
-        # görseller tam genişliği kullanır, kare/dikey olanlar bantın yüksekliğine göre
-        # doğal boyutunda ortalanmış kalır.
-        max_image_width = min(width - 212, int((image_band_height - label_h) * 2.6))
-        image_x1 = 106 + (width - 212 - max_image_width) // 2
-        image_area = (image_x1, image_top + label_h, image_x1 + max_image_width, content_bottom - 4)
-        _paste_fitted_image(img, slide.embedded_image, image_area)
+        if _prefers_side_image(slide):
+            # Tanım/vurgu/formül/çağrı düzenleri tek bir dar metin bloğu kullandığı için
+            # sağ yarı çoğunlukla boşa çıkıyordu. Bu düzenlerde görseli o boşluğa al;
+            # karşılaştırma/süreç/madde listesi gibi genişlik isteyen düzenler aşağıdaki
+            # yatay bant davranışını korur.
+            divider_x = int(width * 0.61)
+            draw.line((divider_x, content_top + 42, divider_x, content_bottom - 42),
+                      fill=theme.border, width=2)
+            _draw_content_layout(draw, slide, 106, divider_x - 34, content_top, content_bottom,
+                                 theme, label_font, compact=True)
+            image_x1, image_x2 = divider_x + 38, width - 106
+            draw.text((image_x1, content_top + 30), image_label,
+                      font=label_font, fill=theme.accent)
+            image_area = (image_x1, content_top + 76, image_x2, content_bottom - 36)
+            draw.rounded_rectangle(image_area, radius=24, fill=theme.surface_alt,
+                                   outline=theme.border, width=2)
+            _paste_fitted_image(
+                img, slide.embedded_image,
+                (image_area[0] + 12, image_area[1] + 12,
+                 image_area[2] - 12, image_area[3] - 12),
+            )
+        else:
+            image_band_height = int((content_bottom - content_top) * 0.34)
+            image_top = content_bottom - image_band_height
+
+            draw.line((106, image_top - 10, width - 106, image_top - 10), fill=theme.border, width=2)
+            _draw_content_layout(draw, slide, 106, width - 106, content_top, image_top - 10,
+                                 theme, label_font, compact=False)
+
+            draw.text((106, image_top + 6), image_label, font=label_font, fill=theme.accent)
+            label_h = label_font.size + 20
+            # Kare/dikey görsellerin çok ince, iki yanında büyük boşluklu görünmesini
+            # engellemek için genişliği de sınırlıyoruz — sadece gerçekten geniş
+            # görseller tam genişliği kullanır.
+            max_image_width = min(width - 212, int((image_band_height - label_h) * 2.6))
+            image_x1 = 106 + (width - 212 - max_image_width) // 2
+            image_area = (image_x1, image_top + label_h, image_x1 + max_image_width, content_bottom - 4)
+            _paste_fitted_image(img, slide.embedded_image, image_area)
     else:
         _draw_content_layout(draw, slide, 106, width - 106, content_top, content_bottom,
                              theme, label_font, compact=False)
@@ -725,6 +746,43 @@ def _paste_fitted_image(img: Image.Image, image_path: str, area: tuple[int, int,
     img.paste(resized, (x1 + (box_w - new_w) // 2, y1 + (box_h - new_h) // 2))
 
 
+def _prefers_side_image(slide: Slide) -> bool:
+    """Yalnızca dar içerik yapısı doğrulanmış düzenleri yan yana göster.
+
+    Bozuk bir `definition`/`formula`/`callout` girdisi renderer'da madde listesine
+    düşer; o durumda listeyi daraltmak yerine alttaki görsel bandını korumak daha
+    okunaklıdır.
+    """
+    if slide.layout == "emphasis":
+        return len(slide.bullets) == 1
+    if slide.layout == "definition":
+        return _parse_definition_pairs(slide.bullets) is not None
+    if slide.layout in {"formula", "callout"}:
+        pairs = _parse_definition_pairs(slide.bullets)
+        return bool(pairs and len(pairs) == 1)
+    return False
+
+
+def _render_ai_background(image_path: str, width: int, height: int,
+                          theme: ThemePreset) -> Image.Image:
+    """Üretilen görseli tam ekran kapla; metin kontrastını temaya göre güvenceye al."""
+    with Image.open(image_path) as source:
+        picture = ImageOps.exif_transpose(source).convert("RGB")
+    picture = ImageOps.fit(
+        picture, (width, height), method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+    picture = picture.filter(ImageFilter.GaussianBlur(radius=max(width / 1600, 0.8)))
+    picture = ImageEnhance.Color(picture).enhance(0.72)
+    picture = ImageEnhance.Contrast(picture).enhance(0.88).convert("RGBA")
+
+    # Başlık rengi koyuysa açık tema, açıksa koyu tema kabul edilir. Böylece tema
+    # renkleri değiştirilmeden görüntü üzerine doğru yönde bir perde uygulanır.
+    title_luma = 0.2126 * theme.title[0] + 0.7152 * theme.title[1] + 0.0722 * theme.title[2]
+    veil = (255, 255, 255, 148) if title_luma < 128 else (7, 12, 24, 128)
+    return Image.alpha_composite(picture, Image.new("RGBA", picture.size, veil)).convert("RGB")
+
+
 def render_slide(slide: Slide, index: int, total: int, breadcrumb: str,
                  out_path: Path, width: int = 1920, height: int = 1080,
                  accent: tuple[int, int, int] | None = None,
@@ -741,14 +799,22 @@ def render_slide(slide: Slide, index: int, total: int, breadcrumb: str,
 
     start = theme.chapter_bg_start if slide.level == "chapter" else theme.bg_start
     end = theme.chapter_bg_end if slide.level == "chapter" else theme.bg_end
-    img = _gradient(width, height, start, end)
-    _decorate(img, theme)
+    has_ai_background = bool(
+        slide.ai_background_image and Path(slide.ai_background_image).is_file()
+    )
+    img = (
+        _render_ai_background(slide.ai_background_image, width, height, theme)
+        if has_ai_background else _gradient(width, height, start, end)
+    )
+    if not has_ai_background:
+        _decorate(img, theme)
     draw = ImageDraw.Draw(img, "RGBA")
 
     if slide.level == "chapter":
         _draw_chapter(img, draw, slide, index, total, theme)
     else:
-        _draw_topic(img, draw, slide, index, total, breadcrumb, theme)
+        _draw_topic(img, draw, slide, index, total, breadcrumb, theme,
+                    has_ai_background=has_ai_background)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path, quality=95)

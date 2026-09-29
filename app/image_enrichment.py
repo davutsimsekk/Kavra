@@ -28,6 +28,7 @@ from app.models import Slide
 
 DEFAULT_SEARCH_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
+ENRICHMENT_MODES = {"support", "background"}
 
 # enrich_slides_with_images'ta kaç slaytın görseli AYNI ANDA aranıp/üretilsin — bu tamamen
 # ağ G/Ç'ye bağlı (CPU değil), bu yüzden pass3'ün render paralelliğinden (CPU çekirdek
@@ -172,6 +173,21 @@ def _fallback_generation_prompt(slide: Slide) -> str:
     )
 
 
+def _background_generation_prompt(slide: Slide) -> str:
+    """Metin bindirilecek 16:9 arka plan için güvenli, sakin bir üretim tarifi."""
+    context = " ".join((slide.narration or "").split())[:420]
+    return (
+        "Create a cinematic 16:9 educational presentation background inspired by "
+        f"the topic '{slide.title}'. Context: '{context}'. "
+        "Use a polished editorial illustration or atmospheric photographic style, "
+        "with restrained detail, soft depth, coherent lighting and generous negative "
+        "space for overlaid lesson text. Keep the center and left-middle visually calm. "
+        "No text, no letters, no labels, no numbers, no logos, no watermark, no UI, "
+        "no technical diagram, no chart, no table, no code. The image must support the "
+        "topic without inventing factual details. Full-bleed widescreen composition."
+    )
+
+
 def find_image_for_slide(slide: Slide, api_key: str, search_model: str = DEFAULT_SEARCH_MODEL,
                          image_model: str = DEFAULT_IMAGE_MODEL) -> tuple[bytes, str, str] | None:
     """Bir slayt için görsel bulur/üretir. Dönüş: (görsel_baytları, uzantı, kaynak) —
@@ -193,6 +209,14 @@ def find_image_for_slide(slide: Slide, api_key: str, search_model: str = DEFAULT
     return (generated[0], generated[1], "generated") if generated else None
 
 
+def find_background_for_slide(
+    slide: Slide, api_key: str, image_model: str = DEFAULT_IMAGE_MODEL,
+) -> tuple[bytes, str, str] | None:
+    """Arama yapmadan, metin bindirmeye uygun dekoratif bir arka plan üretir."""
+    generated = _generate_image(_background_generation_prompt(slide), api_key, image_model)
+    return (generated[0], generated[1], "generated") if generated else None
+
+
 def eligible_for_enrichment(slide: Slide, force: bool = False) -> bool:
     """Bir slaydın görsel zenginleştirmeye aday olup olmadığı — render'da gerçekten
     kullanılamayacak durumları baştan eler (boşa API çağrısı yapmamak için):
@@ -208,7 +232,19 @@ def eligible_for_enrichment(slide: Slide, force: bool = False) -> bool:
         return False
     if slide.background_image:
         return False
+    # Destek görseli + tam ekran YZ arka plan aynı anda slaydı gereksiz kalabalıklaştırır.
+    if slide.ai_background_image:
+        return False
     if slide.embedded_image and not force:
+        return False
+    return True
+
+
+def eligible_for_background(slide: Slide, force: bool = False) -> bool:
+    """Normal tema üst yazılarını koruyan YZ arka planı için uygunluk kontrolü."""
+    if slide.code or slide.background_image or slide.embedded_image:
+        return False
+    if slide.ai_background_image and not force:
         return False
     return True
 
@@ -217,6 +253,7 @@ def enrich_slides_with_images(
     pdir: Path, slides: list[Slide], api_key: str, force: bool = False,
     progress_cb: Callable[[int, int, str], None] | None = None,
     max_workers: int = IMAGE_ENRICH_MAX_WORKERS,
+    mode: str = "support",
 ) -> list[Slide]:
     """Uygun slaytlara (bkz. eligible_for_enrichment) görsel eklemeye çalışır — her
     slaydın araması/üretimi BAĞIMSIZ olduğundan (birinin sonucu diğerini etkilemez,
@@ -234,15 +271,22 @@ def enrich_slides_with_images(
     from app.cost_ledger import record as record_cost
     from app.pipeline import save_script
 
-    images_dir = pdir / "assets" / "images"
+    if mode not in ENRICHMENT_MODES:
+        raise ValueError(f"Bilinmeyen görsel zenginleştirme modu: {mode!r}")
+
+    background_mode = mode == "background"
+    images_dir = pdir / "assets" / ("backgrounds" if background_mode else "images")
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    eligible_indices = [i for i, s in enumerate(slides) if eligible_for_enrichment(s, force)]
+    eligibility = eligible_for_background if background_mode else eligible_for_enrichment
+    eligible_indices = [i for i, s in enumerate(slides) if eligibility(s, force)]
     total = len(eligible_indices)
     if total == 0:
         return slides
 
     def work(index: int):
+        if background_mode:
+            return find_background_for_slide(slides[index], api_key)
         return find_image_for_slide(slides[index], api_key)
 
     done = 0
@@ -254,11 +298,13 @@ def enrich_slides_with_images(
             try:
                 result = future.result()
             except Exception:
-                record_cost(pdir, provider="gemini", kind="image_enrich_error", requests=1)
+                kind = "image_background_error" if background_mode else "image_enrich_error"
+                record_cost(pdir, provider="gemini", kind=kind, requests=1)
                 result = None
                 errored = True
             else:
-                record_cost(pdir, provider="gemini", kind="image_enrich", requests=1)
+                kind = "image_background" if background_mode else "image_enrich"
+                record_cost(pdir, provider="gemini", kind=kind, requests=1)
                 errored = False
             done += 1
             if progress_cb:
@@ -266,9 +312,13 @@ def enrich_slides_with_images(
             if errored or result is None:
                 continue
             image_bytes, ext, source = result
-            image_path = images_dir / f"slide_{index + 1:03d}.{ext}"
+            suffix = "_background" if background_mode else ""
+            image_path = images_dir / f"slide_{index + 1:03d}{suffix}.{ext}"
             image_path.write_bytes(image_bytes)
-            slide.embedded_image = str(image_path)
-            slide.image_source = source
+            if background_mode:
+                slide.ai_background_image = str(image_path)
+            else:
+                slide.embedded_image = str(image_path)
+                slide.image_source = source
             save_script(pdir, slides)
     return slides

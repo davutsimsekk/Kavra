@@ -13,8 +13,10 @@ from app.image_enrichment import (
     _decide_and_search,
     _download_image,
     _generate_image,
+    eligible_for_background,
     eligible_for_enrichment,
     enrich_slides_with_images,
+    find_background_for_slide,
     find_image_for_slide,
 )
 from app.models import Slide
@@ -218,6 +220,12 @@ class SlideImageSourceModelTests(unittest.TestCase):
         old_style = {"title": "Eski proje slaydı", "embeddedImage": "/p.png"}
         self.assertIsNone(Slide.from_dict(old_style).image_source)
 
+    def test_ai_background_round_trips_without_changing_source_page_field(self):
+        slide = Slide(title="x", ai_background_image="/background.png")
+        restored = Slide.from_dict(slide.to_dict())
+        self.assertEqual(restored.ai_background_image, "/background.png")
+        self.assertIsNone(restored.background_image)
+
 
 class EligibilityTests(unittest.TestCase):
     def test_chapter_slide_is_never_eligible(self):
@@ -240,8 +248,49 @@ class EligibilityTests(unittest.TestCase):
     def test_plain_topic_slide_is_eligible(self):
         self.assertTrue(eligible_for_enrichment(Slide(title="x", level="topic")))
 
+    def test_support_image_is_not_added_on_top_of_ai_background(self):
+        self.assertFalse(eligible_for_enrichment(Slide(title="x", ai_background_image="/bg.png")))
+
+    def test_background_allows_chapter_but_excludes_code_page_and_support_image(self):
+        self.assertTrue(eligible_for_background(Slide(title="Bölüm", level="chapter")))
+        self.assertFalse(eligible_for_background(Slide(title="Kod", code="int x;")))
+        self.assertFalse(eligible_for_background(Slide(title="Sayfa", background_image="/page.png")))
+        self.assertFalse(eligible_for_background(Slide(title="Görsel", embedded_image="/image.png")))
+
+    def test_background_force_only_overwrites_an_existing_background(self):
+        slide = Slide(title="x", ai_background_image="/old.png")
+        self.assertFalse(eligible_for_background(slide))
+        self.assertTrue(eligible_for_background(slide, force=True))
+
 
 class EnrichSlidesWithImagesTests(unittest.TestCase):
+    @patch("app.image_enrichment.find_background_for_slide")
+    def test_background_mode_writes_separate_asset_and_model_field(self, find_background):
+        find_background.return_value = (b"background-bytes", "png", "generated")
+        slides = [Slide(title="Bölüm", level="chapter")]
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp)
+            (pdir / "assets").mkdir()
+            with patch("app.pipeline.save_script") as save_script:
+                result = enrich_slides_with_images(pdir, slides, "key", mode="background")
+            expected = pdir / "assets" / "backgrounds" / "slide_001_background.png"
+            self.assertEqual(result[0].ai_background_image, str(expected))
+            self.assertIsNone(result[0].embedded_image)
+            self.assertTrue(expected.is_file())
+            save_script.assert_called_once_with(pdir, slides)
+
+    @patch("app.image_enrichment._generate_image")
+    def test_background_prompt_requires_widescreen_negative_space_and_no_text(self, generate):
+        generate.return_value = (b"bytes", "png")
+        result = find_background_for_slide(
+            Slide(title="Yerçekimi", narration="Kütleler birbirini çeker."), "key",
+        )
+        self.assertEqual(result, (b"bytes", "png", "generated"))
+        prompt = generate.call_args.args[0]
+        self.assertIn("16:9", prompt)
+        self.assertIn("negative space", prompt)
+        self.assertIn("No text", prompt)
+
     @patch("app.image_enrichment.find_image_for_slide")
     def test_only_eligible_slides_are_attempted_and_script_is_saved_incrementally(self, find_image):
         find_image.side_effect = [(b"bytes-1", "png", "search")]  # sadece 1 uygun slayt var

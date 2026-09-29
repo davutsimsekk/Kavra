@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -17,6 +18,7 @@ from app.video.slide_renderer import (
     _CONTENT_LAYOUTS,
     _parse_comparison_columns,
     _parse_definition_pairs,
+    _prefers_side_image,
     render_slide,
 )
 
@@ -193,6 +195,62 @@ class LayoutRenderSmokeTests(unittest.TestCase):
         slide = Slide(title="Adımlar", layout="process",
                       bullets=["1. İlk adım", "2) İkinci adım", "3 - Üçüncü adım"], narration="test")
         self._render(slide, "process-self-numbered")
+
+    def test_valid_definition_with_image_uses_tall_right_column(self):
+        image_path = self.out_dir / "support.png"
+        Image.new("RGB", (500, 500), (30, 120, 210)).save(image_path)
+        slide = Slide(
+            title="Tanım", layout="definition", bullets=["Atalet: Hareket durumunu koruma eğilimi"],
+            narration="test", embedded_image=str(image_path), image_source="generated",
+        )
+        from app.video import slide_renderer as sr
+        with patch.object(sr, "_paste_fitted_image", wraps=sr._paste_fitted_image) as spy:
+            self._render(slide, "definition-side-image")
+        area = spy.call_args.args[2]
+        self.assertGreater(area[0], 1920 * 0.60)
+        self.assertGreater(area[3] - area[1], 500)
+
+    def test_comparison_with_image_keeps_full_width_content_and_bottom_band(self):
+        image_path = self.out_dir / "support-wide.png"
+        Image.new("RGB", (800, 450), (210, 120, 30)).save(image_path)
+        slide = Slide(
+            title="Karşılaştırma", layout="comparison",
+            bullets=["A", "Bir", "---", "B", "İki"], narration="test",
+            embedded_image=str(image_path), image_source="generated",
+        )
+        from app.video import slide_renderer as sr
+        with patch.object(sr, "_paste_fitted_image", wraps=sr._paste_fitted_image) as spy:
+            self._render(slide, "comparison-bottom-image")
+        area = spy.call_args.args[2]
+        self.assertLess(area[1], area[3])
+        self.assertLess(area[3] - area[1], 300)
+
+    def test_only_structurally_valid_narrow_layouts_prefer_side_image(self):
+        self.assertTrue(_prefers_side_image(Slide(title="x", layout="definition", bullets=["A: B"])))
+        self.assertTrue(_prefers_side_image(Slide(title="x", layout="emphasis", bullets=["Tek fikir"])))
+        self.assertFalse(_prefers_side_image(Slide(title="x", layout="definition", bullets=["Kolonsuz"])))
+        self.assertFalse(_prefers_side_image(Slide(title="x", layout="comparison", bullets=["A", "---", "B"])))
+
+    def test_ai_background_renders_for_topic_and_chapter(self):
+        background = self.out_dir / "background.png"
+        Image.new("RGB", (1200, 700), (210, 70, 90)).save(background)
+        self._render(
+            Slide(title="Arka planlı konu", bullets=["Okunaklı metin"],
+                  ai_background_image=str(background)),
+            "ai-background-topic",
+        )
+        self._render(
+            Slide(title="Arka planlı bölüm", level="chapter",
+                  ai_background_image=str(background)),
+            "ai-background-chapter",
+        )
+
+    def test_missing_ai_background_falls_back_to_theme(self):
+        self._render(
+            Slide(title="Eksik görsel", bullets=["Tema yine çizilir"],
+                  ai_background_image=str(self.out_dir / "missing.png")),
+            "missing-ai-background",
+        )
 
 
 class CodeLayoutRenderSmokeTests(unittest.TestCase):

@@ -112,6 +112,17 @@ class SlideHashIgnoresMetadataFieldsTests(unittest.TestCase):
             _slide_hash(slide, "edge", "v", "+0%", fast),
         )
 
+    def test_hash_changes_when_ai_background_changes(self):
+        opts = VideoOptions(theme_preset="auto")
+        plain = Slide(title="Aynı slayt", narration="Aynı anlatım")
+        enriched = Slide(
+            title="Aynı slayt", narration="Aynı anlatım", ai_background_image="/bg.png",
+        )
+        self.assertNotEqual(
+            _slide_hash(plain, "edge", "v", "+0%", opts),
+            _slide_hash(enriched, "edge", "v", "+0%", opts),
+        )
+
 
 class WordCacheRoundTripTests(unittest.TestCase):
     def test_round_trips_word_timings_through_disk(self):

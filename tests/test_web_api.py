@@ -241,6 +241,27 @@ class EnrichImagesEndpointTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json(), {"eligibleCount": 1, "totalSlides": 3})
 
+    def test_background_eligible_count_includes_chapter_but_excludes_busy_slides(self):
+        slides = [
+            Slide(title="Bölüm", level="chapter"),
+            Slide(title="Kod", code="int x;"),
+            Slide(title="Destekli", embedded_image="/image.png"),
+            Slide(title="Normal"),
+        ]
+        with _temp_project(slides) as pdir:
+            response = self.client.get(
+                f"/api/projects/{pdir.name}/enrich-images/eligible-count?mode=background",
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"eligibleCount": 2, "totalSlides": 4})
+
+    def test_unknown_enrichment_mode_is_rejected(self):
+        with _temp_project([Slide(title="x")]) as pdir:
+            response = self.client.get(
+                f"/api/projects/{pdir.name}/enrich-images/eligible-count?mode=unknown",
+            )
+            self.assertEqual(response.status_code, 400)
+
     def test_missing_api_key_is_rejected_before_queuing_a_job(self):
         with _temp_project([Slide(title="x", narration="y")]) as pdir:
             with patch.object(api_module, "get_api_key", return_value=""):
@@ -317,6 +338,40 @@ class EnrichImagesEndpointTests(unittest.TestCase):
                 self.assertEqual(job["status"], "complete", job.get("error"))
                 self.assertEqual(job["result"]["attemptedCount"], 1)
                 self.assertEqual(job["result"]["imagesAdded"], [])
+
+    def test_background_job_updates_the_separate_background_field(self):
+        slide = Slide(title="x", narration="y")
+
+        def fake_enrich(pdir, slides, api_key, force=False, progress_cb=None, mode="support"):
+            self.assertEqual(mode, "background")
+            if progress_cb:
+                progress_cb(1, 1, slides[0].title)
+            slides[0].ai_background_image = str(
+                pdir / "assets" / "backgrounds" / "slide_001_background.jpg"
+            )
+            return slides
+
+        with _temp_project([slide]) as pdir:
+            with patch.object(api_module, "get_api_key", return_value="test-key"), \
+                 patch("app.image_enrichment.enrich_slides_with_images", side_effect=fake_enrich):
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/enrich-images",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"mode": "background"},
+                )
+                job_id = response.json()["jobId"]
+                for _ in range(50):
+                    job = self.client.get(f"/api/jobs/{job_id}").json()
+                    if job["status"] in {"complete", "failed"}:
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(job["status"], "complete", job.get("error"))
+                self.assertEqual(job["result"]["mode"], "background")
+                self.assertTrue(job["result"]["slides"][0]["aiBackgroundImage"].endswith(".jpg"))
+                self.assertEqual(
+                    job["result"]["imagesAdded"],
+                    [{"index": 1, "title": "x", "source": "generated"}],
+                )
 
     def test_summary_only_counts_slides_that_were_actually_eligible(self):
         """Chapter/kod slaytları hiç denenmediğinden özet listesine de girmemeli."""

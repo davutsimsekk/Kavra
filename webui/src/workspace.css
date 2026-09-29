@@ -151,6 +151,7 @@ details[open] > summary > .disclosure-chevron { transform:rotate(90deg); }
 .generation-console .form-grid { grid-template-columns:repeat(3,minmax(0,1fr)); padding:20px 22px; gap:18px; }
 .generation-console .form-grid > .wide { grid-column:1/-1; }
 .generation-console .generate-button { margin:0 22px 22px; }
+.generation-console .image-enrichment-actions { display:flex; flex-wrap:wrap; gap:10px; margin:0 22px 22px; }
 .generation-console > .job-strip { margin:0 22px 18px; }
 .slide-rail { position:sticky; top:18px; max-height:calc(100vh - 36px); }
 .slide-list { max-height:65vh; }
