@@ -53,6 +53,7 @@ def _worker_entry(
     worker_items: list[tuple[int, str, str, str]],
     result_queue,
     retry_incomplete: bool = False,
+    start_event=None,
 ) -> None:
     """Bir alt process içinde çalışır ve durum/sonuç olaylarını kuyruğa yazar."""
     from app.tts.coqui_provider import CoquiTTSProvider
@@ -65,6 +66,12 @@ def _worker_entry(
             result_queue.put(("result", idx, False, _is_oom_text(str(exc)), str(exc)))
         return
     result_queue.put(("status", "ready", worker_index, None))
+    # Modeller sırayla yüklenir fakat tüm worker'lar hazır olana kadar üretime
+    # başlamaz. Böylece üç model gerçekten paralel seslendirirken eşzamanlı
+    # checkpoint/CUDA yüklemesinin Windows'taki yüksek geçici bellek tepesi
+    # ve native 0xC0000005 çökmesi önlenir.
+    if start_event is not None:
+        start_event.wait()
 
     aborted = False
     for idx, text, voice, out_path_str in worker_items:
@@ -102,18 +109,29 @@ def _run_workers(
     import multiprocessing as mp
 
     result_queue: mp.Queue = mp.Queue()
+    start_event = mp.Event()
     non_empty = [g for g in groups if g]
-    procs = [
-        mp.Process(target=_worker_entry, args=(worker_index, group, result_queue, retry_incomplete))
-        for worker_index, group in enumerate(non_empty, start=1)
-    ]
-    for p in procs:
-        p.start()
+    worker_specs = list(enumerate(non_empty, start=1))
+    procs = []
+
+    def start_next_worker() -> None:
+        worker_index, group = worker_specs[len(procs)]
+        process = mp.Process(
+            target=_worker_entry,
+            args=(worker_index, group, result_queue, retry_incomplete, start_event),
+        )
+        process.start()
+        procs.append(process)
+
+    # İlk modeli başlat; her sonraki model bir önceki "ready" olayından sonra
+    # yüklenir. Üretim start_event ile topluca serbest bırakılır.
+    start_next_worker()
 
     outcomes: dict[int, tuple[bool, bool, str | None]] = {}
     total_items = sum(len(g) for g in non_empty)
     completed = 0
     ready_workers = 0
+    worker_total = len(non_empty)
     while completed < total_items:
         try:
             event = result_queue.get(timeout=2)
@@ -130,18 +148,23 @@ def _run_workers(
             for p in procs:
                 if p.is_alive():
                     p.terminate()
+            start_event.set()
             break
 
         if event[0] == "status":
             _kind, state, worker_index, item_index = event
             if state == "loading" and status_cb:
-                status_cb(f"XTTS {len(procs)}× modelleri yükleniyor · {ready_workers}/{len(procs)} hazır")
+                status_cb(f"XTTS {worker_total}× modelleri sırayla yükleniyor · {ready_workers}/{worker_total} hazır")
             elif state == "ready":
                 ready_workers += 1
                 if status_cb:
-                    status_cb(f"XTTS {len(procs)}× modelleri yükleniyor · {ready_workers}/{len(procs)} hazır")
+                    status_cb(f"XTTS {worker_total}× modelleri sırayla yükleniyor · {ready_workers}/{worker_total} hazır")
+                if len(procs) < worker_total:
+                    start_next_worker()
+                elif ready_workers == worker_total:
+                    start_event.set()
             elif state == "started" and status_cb:
-                status_cb(f"XTTS {len(procs)}× seslendiriliyor · slayt {item_index + 1}/{total_items} başladı")
+                status_cb(f"XTTS {worker_total}× seslendiriliyor · slayt {item_index + 1}/{total_items} başladı")
             continue
 
         _kind, idx, ok, is_oom, detail = event
