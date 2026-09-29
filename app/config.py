@@ -137,6 +137,11 @@ class VideoOptions:
     # Chatterbox ayrı ortamda çalışır; 8GB RTX 4060 için iki GPU modelinden
     # fazlasına izin verilmez (OOM durumunda otomatik olarak 1'e iner).
     chatterbox_parallel_workers: int = 1
+    # Chatterbox V3 için iki pahalı güvenlik katmanı isteğe bağlıdır. Varsayılan
+    # bare-minimum mod kısa cümleleri 220 karaktere kadar birleştirir ve her
+    # parçayı yalnız bir kez üretir.
+    chatterbox_sentence_isolation: bool = False
+    chatterbox_retry_incomplete: bool = False
     # "local": seslendirme bu makinede; "remote": GPU'lu uzak Kavra TTS sunucusunda
     # (bkz. app/tts/remote.py). Yalnızca coqui ve piper uzakta çalışır. Cache
     # hash'lerine girmez: aynı motor/ses uzakta da yerelde de aynı sesi verir.
@@ -180,6 +185,8 @@ DEFAULT_SETTINGS = {
     "narration_style": "normal",
     "coqui_parallel_workers": 1,
     "chatterbox_parallel_workers": 1,
+    "chatterbox_sentence_isolation": False,
+    "chatterbox_retry_incomplete": False,
     "tts_backend": "local",
     "remote_tts_concurrency": 2,
     # İki sabit GPU kaynağı (bkz. app/tts/remote.py PROFILES): "pc" (Tailscale üzerinden

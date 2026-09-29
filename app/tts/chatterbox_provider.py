@@ -76,22 +76,27 @@ def list_chatterbox_voices() -> list[dict]:
     return voices
 
 
-def _split_text(text: str, maximum: int = MAX_CHARS_PER_GENERATION) -> list[str]:
-    """Anlatımı cümle sınırlarını koruyan güvenli Chatterbox parçalarına ayırır.
+def _split_text(
+    text: str,
+    maximum: int = MAX_CHARS_PER_GENERATION,
+    isolate_sentences: bool = False,
+) -> list[str]:
+    """Anlatımı Chatterbox'ın güvenli bağlam parçalarına ayırır.
 
-    Bir üretim çağrısında birden fazla cümle tutmak modelin aradaki/sondaki bir
-    cümleyi atlamasını tespit etmeyi zorlaştırır. Bu yüzden normal cümleler
-    birleştirilmez; yalnız maximum'u aşan tek bir cümle sözcük sınırından bölünür.
+    Varsayılan hızlı mod kısa cümleleri ``maximum`` sınırına kadar birleştirir.
+    ``isolate_sentences=True`` seçilirse her normal cümle ayrı üretim çağrısına
+    dönüşür; bu bazı yutma vakalarını azaltabilir ama uzun derslerde belirgin
+    biçimde daha yavaştır. Her iki mod da maximum'u aşan tek cümleyi sözcük
+    sınırından böler.
     """
     clean = " ".join(text.split())
     if not clean:
         return []
     sentences = re.split(r"(?<=[.!?…])\s+", clean)
-    parts: list[str] = []
+    fragments: list[str] = []
     for sentence in sentences:
         if len(sentence) > maximum:
             words = sentence.split()
-            fragments = []
             fragment = ""
             for word in words:
                 candidate = f"{fragment} {word}".strip()
@@ -103,8 +108,22 @@ def _split_text(text: str, maximum: int = MAX_CHARS_PER_GENERATION) -> list[str]
             if fragment:
                 fragments.append(fragment)
         else:
-            fragments = [sentence]
-        parts.extend(fragment for fragment in fragments if fragment)
+            fragments.append(sentence)
+    fragments = [fragment for fragment in fragments if fragment]
+    if isolate_sentences:
+        return fragments
+
+    parts: list[str] = []
+    current = ""
+    for fragment in fragments:
+        candidate = f"{current} {fragment}".strip()
+        if current and len(candidate) > maximum:
+            parts.append(current)
+            current = fragment
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
     return parts
 
 
@@ -118,7 +137,12 @@ class ChatterboxTTSProvider(TTSProvider):
 
     name = "chatterbox"
 
-    def __init__(self, device: str | None = None):
+    def __init__(
+        self,
+        device: str | None = None,
+        sentence_isolation: bool = False,
+        retry_incomplete: bool = False,
+    ):
         try:
             import torch
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
@@ -143,6 +167,8 @@ class ChatterboxTTSProvider(TTSProvider):
             )
         self._model = loader(device=self.device, t3_model=CHATTERBOX_T3_MODEL)
         self._prepared_voice: str | None = None
+        self.sentence_isolation = bool(sentence_isolation)
+        self.retry_incomplete = bool(retry_incomplete)
 
     def list_voices(self) -> list[dict]:
         return list_chatterbox_voices()
@@ -164,14 +190,15 @@ class ChatterboxTTSProvider(TTSProvider):
             self._prepared_voice = resolved_voice
 
         clips = []
-        for part in _split_text(text):
+        for part in _split_text(text, isolate_sentences=self.sentence_isolation):
             # Uzun bir slaytı tek üretimde vermek KV cache'in 8 GB VRAM'i
             # doldurmasına ve modelin bir cümleyi atlamasına neden olabilir.
             # Şüpheli derecede kısa bir sonuçta farklı örnekleme akışıyla yeniden
             # dene; tüm denemeler kısa kalırsa sesi kaybetmek yerine en uzunu kullan.
             best_clip = None
             minimum_duration = _minimum_plausible_duration(part)
-            for _attempt in range(MAX_COMPLETENESS_ATTEMPTS):
+            attempt_count = MAX_COMPLETENESS_ATTEMPTS if self.retry_incomplete else 1
+            for _attempt in range(attempt_count):
                 with self._torch.inference_mode():
                     wav = self._model.generate(
                         part,

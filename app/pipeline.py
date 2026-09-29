@@ -186,15 +186,28 @@ def _renderable_signature(slide: Slide) -> dict:
 
 
 def _slide_hash(slide: Slide, tts_provider: str, voice: str, rate: str, opts: VideoOptions) -> str:
+    chatterbox_variant = ""
+    if tts_provider == "chatterbox":
+        chatterbox_variant = (
+            f"|cb_isolate={int(opts.chatterbox_sentence_isolation)}"
+            f"|cb_retry={int(opts.chatterbox_retry_incomplete)}"
+        )
     payload = json.dumps(_renderable_signature(slide), ensure_ascii=False, sort_keys=True) + \
         f"|{tts_provider}|{voice}|{rate}|{opts.width}x{opts.height}@{opts.fps}" \
         f"|sub={opts.subtitles}|fade={opts.fade_transitions}|kb={opts.ken_burns}" \
         f"|theme={opts.theme_preset}|accent={opts.accent_rgb}|reveal={opts.bullet_reveal}" \
-        f"|quality={opts.quality_preset}"
+        f"|quality={opts.quality_preset}{chatterbox_variant}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _narration_hash(narration_for_tts: str, tts_provider: str, voice: str, rate: str) -> str:
+def _narration_hash(
+    narration_for_tts: str,
+    tts_provider: str,
+    voice: str,
+    rate: str,
+    chatterbox_sentence_isolation: bool = False,
+    chatterbox_retry_incomplete: bool = False,
+) -> str:
     """Only the inputs that actually affect the synthesized audio.
 
     Kept separate from _slide_hash so a theme/subtitle/fade change (which does
@@ -208,6 +221,11 @@ def _narration_hash(narration_for_tts: str, tts_provider: str, voice: str, rate:
     audio automatically, with no separate "dictionary version" to track.
     """
     payload = f"{narration_for_tts}|{tts_provider}|{voice}|{rate}"
+    if tts_provider == "chatterbox":
+        payload += (
+            f"|cb_isolate={int(chatterbox_sentence_isolation)}"
+            f"|cb_retry={int(chatterbox_retry_incomplete)}"
+        )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -292,7 +310,14 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
         narration_for_tts = normalize_pronunciation(narration, mapping=pronunciation_map)
 
         h = _slide_hash(slide, tts_provider_name, voice, rate, opts)
-        narration_hash = _narration_hash(narration_for_tts, tts_provider_name, voice, rate)
+        narration_hash = _narration_hash(
+            narration_for_tts,
+            tts_provider_name,
+            voice,
+            rate,
+            chatterbox_sentence_isolation=opts.chatterbox_sentence_isolation,
+            chatterbox_retry_incomplete=opts.chatterbox_retry_incomplete,
+        )
         entry = {
             "slide": slide, "index": i, "narration": narration,
             "hash": h, "narration_hash": narration_hash,
@@ -395,6 +420,8 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
                 opts.chatterbox_parallel_workers,
                 progress_cb=on_tts_progress,
                 status_cb=on_tts_status,
+                sentence_isolation=opts.chatterbox_sentence_isolation,
+                retry_incomplete=opts.chatterbox_retry_incomplete,
             )
         else:
             results = []

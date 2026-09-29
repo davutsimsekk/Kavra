@@ -68,6 +68,8 @@ def _read_worker_output(worker_number: int, process: subprocess.Popen, events: q
 
 def _run_workers(
     groups: list[list[tuple[int, str, str, str]]],
+    sentence_isolation: bool = False,
+    retry_incomplete: bool = False,
     progress_cb=None,
     status_cb=None,
 ) -> dict[int, tuple[bool, bool, str | None]]:
@@ -101,6 +103,8 @@ def _run_workers(
                             for index, text, voice, out_path in group
                         ],
                         "resultPath": str(result_path),
+                        "sentenceIsolation": bool(sentence_isolation),
+                        "retryIncomplete": bool(retry_incomplete),
                     },
                     ensure_ascii=False,
                 ),
@@ -249,6 +253,8 @@ def synthesize_parallel(
     _run_workers_fn=None,
     progress_cb=None,
     status_cb=None,
+    sentence_isolation: bool = False,
+    retry_incomplete: bool = False,
 ) -> list[SynthResult]:
     """Chatterbox seslerini bağımsız GPU worker'larına bölerek üretir."""
     if not items:
@@ -256,7 +262,13 @@ def synthesize_parallel(
     n_workers = min(max(n_workers, 1), MAX_PARALLEL_WORKERS, len(items))
     groups = _distribute([(text, voice, str(out_path)) for text, voice, out_path in items], n_workers)
     if _run_workers_fn is None:
-        outcomes = _run_workers(groups, progress_cb, status_cb)
+        outcomes = _run_workers(
+            groups,
+            sentence_isolation=sentence_isolation,
+            retry_incomplete=retry_incomplete,
+            progress_cb=progress_cb,
+            status_cb=status_cb,
+        )
     else:
         outcomes = _run_workers_fn(groups, progress_cb)
     failures = [(index, recoverable, detail) for index, (ok, recoverable, detail) in outcomes.items() if not ok]
@@ -276,7 +288,15 @@ def synthesize_parallel(
             if progress_cb:
                 progress_cb(successful_count + done, len(items))
 
-        synthesize_parallel(retry_items, 1, _run_workers_fn, retry_progress, status_cb)
+        synthesize_parallel(
+            retry_items,
+            1,
+            _run_workers_fn,
+            retry_progress,
+            status_cb,
+            sentence_isolation=sentence_isolation,
+            retry_incomplete=retry_incomplete,
+        )
         return [SynthResult(duration=0.0, words=None) for _ in items]
     _index, _recoverable, detail = failures[0]
     raise RuntimeError(detail or "Chatterbox ses üretimi başarısız oldu.")

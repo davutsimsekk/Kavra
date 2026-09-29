@@ -262,6 +262,8 @@ export default function App() {
     qualityPreset: 'high',
     coquiParallelWorkers: 1,
     chatterboxParallelWorkers: 1,
+    chatterboxSentenceIsolation: false,
+    chatterboxRetryIncomplete: false,
     ttsBackend: 'local', remoteTtsConcurrency: 2,
   })
 
@@ -296,6 +298,8 @@ export default function App() {
           qualityPreset: s.video_quality_preset || 'high',
           coquiParallelWorkers: s.coqui_parallel_workers || 1,
           chatterboxParallelWorkers: s.chatterbox_parallel_workers || 1,
+          chatterboxSentenceIsolation: s.chatterbox_sentence_isolation || false,
+          chatterboxRetryIncomplete: s.chatterbox_retry_incomplete || false,
           ttsBackend: s.tts_backend || 'local',
           remoteTtsConcurrency: s.remote_tts_concurrency || 2,
         }))
@@ -600,6 +604,8 @@ export default function App() {
             qualityPreset: video.qualityPreset,
             coquiParallelWorkers: video.coquiParallelWorkers,
             chatterboxParallelWorkers: video.chatterboxParallelWorkers,
+            chatterboxSentenceIsolation: video.chatterboxSentenceIsolation,
+            chatterboxRetryIncomplete: video.chatterboxRetryIncomplete,
           },
         }),
       })
@@ -1639,17 +1645,36 @@ export default function App() {
             </label>
           )}
           {video.ttsProvider === 'chatterbox' && (
-            <label className="field wide">
-              <span>Paralel GPU model sayısı</span>
-              <select
-                value={video.chatterboxParallelWorkers}
-                onChange={(e) => setVideo({ ...video, chatterboxParallelWorkers: Number(e.target.value) })}
-              >
-                <option value={1}>1 model — sıralı üretim (en stabil)</option>
-                <option value={2}>2 paralel model — ölçülen 1,99× hız (~7,8 GB tepe VRAM)</option>
-              </select>
-              <small>İlk model yüklenmesi ölçüme dahil değildir; sonrasında worker'lar kendi slaytlarını sırayla üretir. RTX 4060 8 GB üzerinde 3 model belleği tamamen doldurup belirgin biçimde yavaşladığı için güvenli üst sınır 2'dir. CUDA belleği yetmezse sistem otomatik olarak tek modele iner.</small>
-            </label>
+            <>
+              <label className="field wide">
+                <span>Paralel GPU model sayısı</span>
+                <select
+                  value={video.chatterboxParallelWorkers}
+                  onChange={(e) => setVideo({ ...video, chatterboxParallelWorkers: Number(e.target.value) })}
+                >
+                  <option value={1}>1 model — sıralı üretim (en stabil)</option>
+                  <option value={2}>2 paralel model — ölçülen 1,99× hız (~7,8 GB tepe VRAM)</option>
+                </select>
+                <small>İlk model yüklenmesi ölçüme dahil değildir; sonrasında worker'lar kendi slaytlarını sırayla üretir. RTX 4060 8 GB üzerinde 3 model belleği tamamen doldurup belirgin biçimde yavaşladığı için güvenli üst sınır 2'dir. CUDA belleği yetmezse sistem otomatik olarak tek modele iner.</small>
+              </label>
+              <Toggle
+                checked={video.chatterboxSentenceIsolation}
+                onChange={(value) => setVideo({ ...video, chatterboxSentenceIsolation: value })}
+                label="Her cümleyi ayrı üret"
+                hint={video.chatterboxSentenceIsolation
+                  ? 'Cümle yutma riskini azaltır; üretim çağrısı sayısını ve süreyi artırır.'
+                  : 'Hızlı mod: kısa cümleler 220 karaktere kadar aynı çağrıda birleştirilir.'}
+              />
+              <Toggle
+                checked={video.chatterboxRetryIncomplete}
+                onChange={(value) => setVideo({ ...video, chatterboxRetryIncomplete: value })}
+                label="Eksik ses için tekrar dene"
+                hint={video.chatterboxRetryIncomplete
+                  ? 'Şüpheli kısa bir çıktı en fazla 3 kez üretilir; süre belirgin artabilir.'
+                  : 'Bare minimum: her metin parçası yalnızca bir kez üretilir.'}
+              />
+              <div className="session-note wide"><Zap size={14} /><span>İki seçenek de kapalıyken yalnız Chatterbox V3 ve seçtiğimiz canlı ses ayarları kullanılır: temperature 0.85, exaggeration 0.80, cfg 0.30.</span></div>
+            </>
           )}
         </div>
         {renderEstimate && <div className={`estimate-card ${renderEstimate.diskWarning ? 'warning' : ''}`}>

@@ -19,6 +19,18 @@ from app.tts.chatterbox_parallel import (
 
 
 class ChatterboxParallelTests(unittest.TestCase):
+    @patch("app.tts.chatterbox_parallel._run_workers")
+    def test_optional_safety_flags_reach_real_worker_runner(self, run_workers):
+        run_workers.return_value = {0: (True, False, None)}
+        synthesize_parallel(
+            [("a", "v", Path("a.mp3"))],
+            1,
+            sentence_isolation=True,
+            retry_incomplete=True,
+        )
+        self.assertTrue(run_workers.call_args.kwargs["sentence_isolation"])
+        self.assertTrue(run_workers.call_args.kwargs["retry_incomplete"])
+
     def test_configured_python_path_supports_container_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
             python = Path(tmp) / "bin" / "python"

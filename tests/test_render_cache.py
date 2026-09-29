@@ -123,6 +123,22 @@ class SlideHashIgnoresMetadataFieldsTests(unittest.TestCase):
             _slide_hash(enriched, "edge", "v", "+0%", opts),
         )
 
+    def test_chatterbox_safety_options_change_render_hash(self):
+        slide = Slide(title="Aynı slayt", narration="Aynı anlatım")
+        bare = VideoOptions()
+        guarded = VideoOptions(
+            chatterbox_sentence_isolation=True,
+            chatterbox_retry_incomplete=True,
+        )
+        self.assertNotEqual(
+            _slide_hash(slide, "chatterbox", "v", "+0%", bare),
+            _slide_hash(slide, "chatterbox", "v", "+0%", guarded),
+        )
+        self.assertEqual(
+            _slide_hash(slide, "edge", "v", "+0%", bare),
+            _slide_hash(slide, "edge", "v", "+0%", guarded),
+        )
+
 
 class WordCacheRoundTripTests(unittest.TestCase):
     def test_round_trips_word_timings_through_disk(self):

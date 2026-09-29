@@ -33,7 +33,10 @@ def main(spec_path: str) -> int:
     try:
         from app.tts.chatterbox_provider import ChatterboxTTSProvider
 
-        provider = ChatterboxTTSProvider()
+        provider = ChatterboxTTSProvider(
+            sentence_isolation=bool(spec.get("sentenceIsolation", False)),
+            retry_incomplete=bool(spec.get("retryIncomplete", False)),
+        )
     except Exception as exc:
         detail = str(exc)
         results = [

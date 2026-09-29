@@ -90,6 +90,11 @@ XTTS v2 ve Piper, GPU'suz bir sunucudan uzak bir GPU'ya (kendi bilgisayarın vey
 bkz. [REMOTE_TTS.md](REMOTE_TTS.md). Lisans notları özet niyetinedir; ticari kullanım öncesi ilgili
 lisansı kendin doğrula.
 
+Chatterbox V3 varsayılan olarak hızlı/bare-minimum modda çalışır: kısa cümleleri güvenli karakter
+sınırına kadar birleştirir ve her parçayı bir kez üretir. Video ayarlarında isteğe bağlı olarak
+“Her cümleyi ayrı üret” ve “Eksik ses için tekrar dene” korumaları açılabilir; ikisi de cümle yutma
+riskini azaltmayı hedefler ancak özellikle uzun derslerde üretim süresini belirgin artırabilir.
+
 ## Video özellikleri
 
 - Kart tabanlı modern slayt tasarımı; altı hazır tema (Beyaz Minimal, Notebook Açık, Gece Mavisi,

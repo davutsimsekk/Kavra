@@ -1274,6 +1274,34 @@ class RenderCoquiParallelWorkersValidationTests(unittest.TestCase):
                 options = fake_render.call_args[0][-1]
                 self.assertEqual(options.quality_preset, "balanced")
 
+    def test_chatterbox_safety_options_default_off_and_reach_render_worker(self):
+        with _temp_project([self._slide()]) as pdir:
+            with patch("studio_web.api._render_in_isolated_process", return_value={}) as fake_render:
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/render",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={"ttsProvider": "chatterbox"},
+                )
+                self._wait_for_job(response.json()["jobId"])
+                options = fake_render.call_args[0][-1]
+                self.assertFalse(options.chatterbox_sentence_isolation)
+                self.assertFalse(options.chatterbox_retry_incomplete)
+
+            with patch("studio_web.api._render_in_isolated_process", return_value={}) as fake_render:
+                response = self.client.post(
+                    f"/api/projects/{pdir.name}/render",
+                    headers={"Origin": "http://127.0.0.1:5173"},
+                    json={
+                        "ttsProvider": "chatterbox",
+                        "chatterboxSentenceIsolation": True,
+                        "chatterboxRetryIncomplete": True,
+                    },
+                )
+                self._wait_for_job(response.json()["jobId"])
+                options = fake_render.call_args[0][-1]
+                self.assertTrue(options.chatterbox_sentence_isolation)
+                self.assertTrue(options.chatterbox_retry_incomplete)
+
 
 class VisionNarrateEndpointTests(unittest.TestCase):
     def setUp(self):
