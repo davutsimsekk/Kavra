@@ -12,10 +12,9 @@ VRAM'e yüklemeye çalışmak GERÇEK BİR WINDOWS MAVİ EKRANINA (BSOD) yol aç
 Bu yüzden:
   1. İzin verilen worker sayısı sabit bir üst sınırla (MAX_PARALLEL_WORKERS)
      kısıtlı — kullanıcı arayüzü de bunu aşamaz.
-  2. Bir grup CUDA belleğine sığmazsa (yakalanabilir bir OutOfMemoryError),
-     worker sayısı otomatik olarak YARIYA iner ve yeniden denenir, en kötü
-     durumda tek process'e (her zaman güvenli olduğu kanıtlanmış, orijinal
-     yöntem) düşülür.
+  2. İsteğe bağlı tekrar koruması açıksa, bir grup CUDA belleğine sığmadığında
+     (yakalanabilir bir OutOfMemoryError) worker sayısı azalır ve yeniden
+     denenir. Varsayılan eski/hızlı mod hata durumunda açıkça durur.
   3. Bu geri çekilme yalnızca PYTHON SEVİYESİNDE yakalanabilen hatalar
      içindir — gerçek bir sürücü çökmesi (BSOD gibi) Python'dan yakalanamaz.
      Bu yüzden (1) maddesi asıl güvenlik önlemidir; (2) yalnızca sınıra yakın
@@ -53,13 +52,14 @@ def _worker_entry(
     worker_index: int,
     worker_items: list[tuple[int, str, str, str]],
     result_queue,
+    retry_incomplete: bool = False,
 ) -> None:
     """Bir alt process içinde çalışır ve durum/sonuç olaylarını kuyruğa yazar."""
     from app.tts.coqui_provider import CoquiTTSProvider
 
     result_queue.put(("status", "loading", worker_index, None))
     try:
-        provider = CoquiTTSProvider(gpu=True)
+        provider = CoquiTTSProvider(gpu=True, retry_incomplete=retry_incomplete)
     except Exception as exc:
         for idx, *_rest in worker_items:
             result_queue.put(("result", idx, False, _is_oom_text(str(exc)), str(exc)))
@@ -89,6 +89,7 @@ def _run_workers(
     groups: list[list[tuple[int, str, str, str]]],
     progress_cb=None,
     status_cb=None,
+    retry_incomplete: bool = False,
 ) -> dict[int, tuple[bool, bool, str | None]]:
     """Verilen grupları gerçek ayrı process'lerde çalıştırır, sonuçları toplar.
     Test edilebilirlik için synthesize_parallel'dan ayrı bir fonksiyon —
@@ -103,7 +104,7 @@ def _run_workers(
     result_queue: mp.Queue = mp.Queue()
     non_empty = [g for g in groups if g]
     procs = [
-        mp.Process(target=_worker_entry, args=(worker_index, group, result_queue))
+        mp.Process(target=_worker_entry, args=(worker_index, group, result_queue, retry_incomplete))
         for worker_index, group in enumerate(non_empty, start=1)
     ]
     for p in procs:
@@ -160,16 +161,15 @@ def synthesize_parallel(
     _run_workers_fn=None,
     progress_cb=None,
     status_cb=None,
+    retry_incomplete: bool = False,
 ) -> list[SynthResult]:
     """items: (text, voice, out_path). Tüm öğeler aynı sesi kullanmalı (bir
     render işi zaten tek bir ses kullanır). n_workers <= 1 ise (ya da tek
     öğe varsa) her zaman güvenli olan sıralı/tekil yönteme düşer.
 
-    Bir grup CUDA belleğine sığmazsa otomatik olarak daha az worker'la
-    (yarıya inerek) yeniden dener; OOM DIŞI bir hata (ör. ileride bir
-    coqui-tts sürüm değişikliği bu iç yapıyı bozarsa) render'ı sessizce
-    yutmaz, açıkça hata fırlatır — bu, "sessizce yanlış ses üretme" riskini
-    "render açıkça başarısız olur, kullanıcı ne olduğunu görür" ile değiştirir.
+    ``retry_incomplete=True`` seçilirse CUDA belleğine sığmayan grup daha az
+    worker'la yeniden denenir. Varsayılan False olduğunda ve OOM DIŞI her
+    hatada render açıkça durur; böylece pahalı sürpriz tekrarlar yapılmaz.
 
     progress_cb(tamamlanan, toplam) verilirse, her ses öğesi bitişinde
     çağrılır (hem tek process'lik düşük seviye hem de çok worker'lı yolda) —
@@ -182,7 +182,7 @@ def synthesize_parallel(
 
         if status_cb:
             status_cb("XTTS modeli yükleniyor")
-        provider = CoquiTTSProvider(gpu=True)
+        provider = CoquiTTSProvider(gpu=True, retry_incomplete=retry_incomplete)
         if status_cb:
             status_cb("XTTS modeli hazır · seslendirme başlıyor")
         results = []
@@ -199,7 +199,12 @@ def synthesize_parallel(
     groups = _distribute(string_items, n_workers)
 
     if _run_workers_fn is None:
-        outcomes = _run_workers(groups, progress_cb, status_cb)
+        outcomes = _run_workers(
+            groups,
+            progress_cb,
+            status_cb,
+            retry_incomplete=retry_incomplete,
+        )
     else:
         outcomes = _run_workers_fn(groups, progress_cb)
 
@@ -207,7 +212,7 @@ def synthesize_parallel(
     if not failures:
         return [SynthResult(duration=0.0, words=None) for _ in items]
 
-    if failures and all(is_oom for _, is_oom, _ in failures) and n_workers > 1:
+    if retry_incomplete and failures and all(is_oom for _, is_oom, _ in failures) and n_workers > 1:
         failed_indexes = sorted(index for index, _is_oom, _detail in failures)
         retry_items = [items[index] for index in failed_indexes]
         successful_count = len(items) - len(retry_items)
@@ -222,7 +227,14 @@ def synthesize_parallel(
             if progress_cb:
                 progress_cb(successful_count + done, len(items))
 
-        synthesize_parallel(retry_items, retry_n, _run_workers_fn, retry_progress, status_cb)
+        synthesize_parallel(
+            retry_items,
+            retry_n,
+            _run_workers_fn,
+            retry_progress,
+            status_cb,
+            retry_incomplete=True,
+        )
         return [SynthResult(duration=0.0, words=None) for _ in items]
 
     _, _, detail = failures[0]

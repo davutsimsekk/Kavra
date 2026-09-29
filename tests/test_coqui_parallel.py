@@ -144,7 +144,9 @@ class SynthesizeParallelOrchestrationTests(unittest.TestCase):
         fake_provider = _FakeProvider("sequential-ok")
         with patch("app.tts.coqui_provider.CoquiTTSProvider", return_value=fake_provider):
             items = [("a", "v", Path("a.mp3")), ("b", "v", Path("b.mp3")), ("c", "v", Path("c.mp3"))]
-            results = synthesize_parallel(items, 3, _run_workers_fn=fake_run_workers)
+            results = synthesize_parallel(
+                items, 3, _run_workers_fn=fake_run_workers, retry_incomplete=True,
+            )
 
         self.assertEqual(len(results), 3)
         self.assertTrue(all(result.words is None for result in results))
@@ -158,7 +160,9 @@ class SynthesizeParallelOrchestrationTests(unittest.TestCase):
 
         with patch("app.tts.coqui_provider.CoquiTTSProvider", return_value=fake_provider):
             items = [("a", "v", Path("a.mp3")), ("b", "v", Path("b.mp3"))]
-            results = synthesize_parallel(items, 2, _run_workers_fn=always_oom)
+            results = synthesize_parallel(
+                items, 2, _run_workers_fn=always_oom, retry_incomplete=True,
+            )
 
         # n_workers=2 -> OOM -> retry n=1 -> n<=1 dalı hep-güvenli sıralı yola düşer
         self.assertEqual(len(results), 2)
@@ -192,6 +196,7 @@ class SynthesizeParallelOrchestrationTests(unittest.TestCase):
                 2,
                 _run_workers_fn=fake_run_workers,
                 progress_cb=lambda done, total: progress.append((done, total)),
+                retry_incomplete=True,
             )
 
         self.assertCountEqual(attempts[0], ["ready-a", "missing", "ready-c"])
@@ -200,6 +205,23 @@ class SynthesizeParallelOrchestrationTests(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertEqual(progress[-1], (3, 3))
         self.assertEqual(len(results), 3)
+
+    def test_oom_retry_is_disabled_by_default(self):
+        def always_oom(groups, progress_cb=None):
+            return {i: (False, True, "CUDA out of memory") for g in groups for i, *_ in g}
+
+        items = [("a", "v", Path("a.mp3")), ("b", "v", Path("b.mp3"))]
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            synthesize_parallel(items, 2, _run_workers_fn=always_oom)
+
+    @patch("app.tts.coqui_parallel._run_workers")
+    def test_optional_retry_flag_reaches_real_worker_runner(self, run_workers):
+        run_workers.return_value = {0: (True, False, None), 1: (True, False, None)}
+        items = [("a", "v", Path("a.mp3")), ("b", "v", Path("b.mp3"))]
+
+        synthesize_parallel(items, 2, retry_incomplete=True)
+
+        self.assertTrue(run_workers.call_args.kwargs["retry_incomplete"])
 
     def test_non_oom_failure_raises_instead_of_silently_falling_back(self):
         def fake_run_workers(groups, progress_cb=None):

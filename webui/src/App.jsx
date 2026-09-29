@@ -261,6 +261,7 @@ export default function App() {
     subtitles: true, fadeTransitions: true, kenBurns: false, bulletReveal: false, elevenlabsKey: '',
     qualityPreset: 'high',
     coquiParallelWorkers: 1,
+    coquiRetryIncomplete: false,
     chatterboxParallelWorkers: 1,
     chatterboxSentenceIsolation: false,
     chatterboxRetryIncomplete: false,
@@ -297,6 +298,7 @@ export default function App() {
           bulletReveal: s.bullet_reveal || false,
           qualityPreset: s.video_quality_preset || 'high',
           coquiParallelWorkers: s.coqui_parallel_workers || 1,
+          coquiRetryIncomplete: s.coqui_retry_incomplete || false,
           chatterboxParallelWorkers: s.chatterbox_parallel_workers || 1,
           chatterboxSentenceIsolation: s.chatterbox_sentence_isolation || false,
           chatterboxRetryIncomplete: s.chatterbox_retry_incomplete || false,
@@ -603,6 +605,7 @@ export default function App() {
             bulletReveal: video.bulletReveal, theme: video.theme,
             qualityPreset: video.qualityPreset,
             coquiParallelWorkers: video.coquiParallelWorkers,
+            coquiRetryIncomplete: video.coquiRetryIncomplete,
             chatterboxParallelWorkers: video.chatterboxParallelWorkers,
             chatterboxSentenceIsolation: video.chatterboxSentenceIsolation,
             chatterboxRetryIncomplete: video.chatterboxRetryIncomplete,
@@ -1626,6 +1629,7 @@ export default function App() {
           {REMOTE_ENGINES.includes(video.ttsProvider) && <RemoteGpuControls video={video} setVideo={setVideo} api={api} />}
           {video.ttsProvider === 'elevenlabs' && <label className="field"><span>ElevenLabs API anahtarı</span><input type="password" value={video.elevenlabsKey} onChange={(e) => setVideo({ ...video, elevenlabsKey: e.target.value })} /></label>}
           {video.ttsProvider === 'coqui' && effectiveBackend(video) === 'local' && (
+            <>
             <label className="field wide">
               <span>Paralel model sayısı</span>
               <select
@@ -1639,10 +1643,19 @@ export default function App() {
               <small>
                 Her worker kendi model kopyasını belleğe yükler. VRAM'i az olan bir bilgisayarda
                 yüksek bir değer sistemin çökmesine (mavi ekran) yol açabilir — emin değilsen kapalı bırak.
-                Yetersiz bellekte yakalanabilir bir hata (CUDA belleği doldu) alınırsa sistem otomatik
-                olarak daha az worker'la yeniden dener.
+                3x, yeniden deneme değil aynı anda yüklenen üç model kopyasıdır.
               </small>
             </label>
+            <Toggle
+              checked={video.coquiRetryIncomplete}
+              onChange={(value) => setVideo({ ...video, coquiRetryIncomplete: value })}
+              label="Eksik/başarısız XTTS sesi için tekrar dene"
+              hint={video.coquiRetryIncomplete
+                ? 'Şüpheli kısa ses en fazla 3 kez; worker/OOM hatası daha düşük paralellikle yeniden denenir.'
+                : 'Eski hızlı mod: her slayt yalnız bir kez üretilir, hata olursa açıkça durur.'}
+            />
+            <div className="session-note wide"><Zap size={14} /><span>Kapalıyken yalnız XTTS v2 ve seçtiğimiz canlılık ayarları kullanılır: temperature 0.75, repetition penalty 10, top-k 50, top-p 0.85.</span></div>
+            </>
           )}
           {video.ttsProvider === 'chatterbox' && (
             <>

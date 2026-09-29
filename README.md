@@ -95,6 +95,10 @@ sınırına kadar birleştirir ve her parçayı bir kez üretir. Video ayarları
 “Her cümleyi ayrı üret” ve “Eksik ses için tekrar dene” korumaları açılabilir; ikisi de cümle yutma
 riskini azaltmayı hedefler ancak özellikle uzun derslerde üretim süresini belirgin artırabilir.
 
+XTTS v2 de varsayılan olarak eski tek-denemelik üretim yolunu ve seçilmiş canlılık ayarlarını
+kullanır. Şüpheli kısa sesler ile yakalanabilir worker/OOM hatalarının yeniden denenmesi, video
+ayarlarındaki “Eksik/başarısız XTTS sesi için tekrar dene” seçeneğiyle isteğe bağlı açılır.
+
 ## Video özellikleri
 
 - Kart tabanlı modern slayt tasarımı; altı hazır tema (Beyaz Minimal, Notebook Açık, Gece Mavisi,

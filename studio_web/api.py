@@ -1281,6 +1281,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         quality_preset=quality_preset,
         theme_preset=str(payload.get("theme", "auto")),
         coqui_parallel_workers=coqui_parallel_workers,
+        coqui_retry_incomplete=bool(payload.get("coquiRetryIncomplete", False)),
         chatterbox_parallel_workers=chatterbox_parallel_workers,
         chatterbox_sentence_isolation=bool(payload.get("chatterboxSentenceIsolation", False)),
         chatterbox_retry_incomplete=bool(payload.get("chatterboxRetryIncomplete", False)),
@@ -1299,6 +1300,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         "video_quality_preset": options.quality_preset,
         "theme_preset": options.theme_preset,
         "coqui_parallel_workers": options.coqui_parallel_workers,
+        "coqui_retry_incomplete": options.coqui_retry_incomplete,
         "chatterbox_parallel_workers": options.chatterbox_parallel_workers,
         "chatterbox_sentence_isolation": options.chatterbox_sentence_isolation,
         "chatterbox_retry_incomplete": options.chatterbox_retry_incomplete,
@@ -1315,7 +1317,7 @@ def start_render(project_id: str, payload: dict = Body(...), video_id: str | Non
         )
 
     course_projects.save_video_settings(pdir, "videoSettings", payload,
-        ("theme", "ttsProvider", "voice", "rate", "subtitles", "fadeTransitions", "kenBurns", "bulletReveal", "qualityPreset", "coquiParallelWorkers", "chatterboxParallelWorkers", "chatterboxSentenceIsolation", "chatterboxRetryIncomplete", "ttsBackend", "remoteTtsConcurrency"))
+        ("theme", "ttsProvider", "voice", "rate", "subtitles", "fadeTransitions", "kenBurns", "bulletReveal", "qualityPreset", "coquiParallelWorkers", "coquiRetryIncomplete", "chatterboxParallelWorkers", "chatterboxSentenceIsolation", "chatterboxRetryIncomplete", "ttsBackend", "remoteTtsConcurrency"))
     job_id = jobs.create(
         "video",
         work,

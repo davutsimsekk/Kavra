@@ -134,6 +134,10 @@ class VideoOptions:
     # olarak "daha fazla dene" ile keşfetmek güvenli değil, kullanıcı N'yi
     # kendi belirlemeli.
     coqui_parallel_workers: int = 1
+    # XTTS v2 varsayılan olarak eski tek-denemelik üretim yolunu kullanır.
+    # Açılırsa şüpheli kısa sesler ve yakalanabilir paralel worker/OOM hataları
+    # en fazla üç kez, daha güvenli worker sayısıyla yeniden denenebilir.
+    coqui_retry_incomplete: bool = False
     # Chatterbox ayrı ortamda çalışır; 8GB RTX 4060 için iki GPU modelinden
     # fazlasına izin verilmez (OOM durumunda otomatik olarak 1'e iner).
     chatterbox_parallel_workers: int = 1
@@ -184,6 +188,7 @@ DEFAULT_SETTINGS = {
     "theme_preset": "auto",
     "narration_style": "normal",
     "coqui_parallel_workers": 1,
+    "coqui_retry_incomplete": False,
     "chatterbox_parallel_workers": 1,
     "chatterbox_sentence_isolation": False,
     "chatterbox_retry_incomplete": False,

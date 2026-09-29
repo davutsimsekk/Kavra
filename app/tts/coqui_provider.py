@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,8 @@ XTTS_REPETITION_PENALTY = 10.0
 XTTS_TOP_K = 50
 XTTS_TOP_P = 0.85
 XTTS_SPEED = 1.0
+MAX_COMPLETENESS_ATTEMPTS = 3
+MAX_PLAUSIBLE_WORDS_PER_SECOND = 5.2
 _DOGA_REFERENCE_STEM = "Doga_Upbeat_Rich"
 
 # XTTS v2'nin hazır konuşmacıları belirli bir dile bağlı değildir. Aşağıdaki
@@ -140,6 +143,12 @@ def _patch_xtts_audio_loading() -> None:
     xtts_module.load_audio = load_audio
 
 
+def _minimum_plausible_duration(text: str) -> float:
+    """Şüpheli biçimde erken kesilmiş XTTS çıktıları için ihtiyatlı alt sınır."""
+    word_count = len(re.findall(r"\S+", text))
+    return max(0.55, word_count / MAX_PLAUSIBLE_WORDS_PER_SECOND)
+
+
 class CoquiTTSProvider(TTSProvider):
     """Coqui XTTS v2: offline, çok dilli, ses klonlama destekli ama ağır (torch + ~2GB model).
     Kurulu değilse açık bir hata verir; kurulum için gui/install_coqui.py kullan.
@@ -162,7 +171,7 @@ class CoquiTTSProvider(TTSProvider):
     """
     name = "coqui"
 
-    def __init__(self, gpu: bool | None = None):
+    def __init__(self, gpu: bool | None = None, retry_incomplete: bool = False):
         try:
             from TTS.api import TTS
         except ImportError as e:
@@ -183,6 +192,7 @@ class CoquiTTSProvider(TTSProvider):
                 gpu = False
 
         self.gpu = gpu
+        self.retry_incomplete = bool(retry_incomplete)
         self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=gpu)
         # Klonlanmış bir ses (speaker_wav) kullanıldığında, coqui-tts'in yüksek
         # seviyeli tts_to_file() yolu HER çağrıda referans wav'ı yeniden kodlayıp
@@ -239,13 +249,21 @@ class CoquiTTSProvider(TTSProvider):
             top_k=XTTS_TOP_K,
             top_p=XTTS_TOP_P,
             speed=XTTS_SPEED,
-            split_sentences=True,
         )
-        self.tts.tts_to_file(**kwargs)
-
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(out_path)],
-            capture_output=True, text=True, check=True,
-        )
-        duration = float(result.stdout.strip())
+        # split_sentences'i özellikle geçmiyoruz: bu, canlılık parametreleri
+        # eklenmeden önceki XTTS API çağrısının aynısıdır. Coqui'nin kendi
+        # varsayılan uzun-metin davranışı korunur; uygulama ek bir cümle/call
+        # katmanı oluşturmaz.
+        attempts = MAX_COMPLETENESS_ATTEMPTS if self.retry_incomplete else 1
+        duration = 0.0
+        minimum_duration = _minimum_plausible_duration(text)
+        for _attempt in range(attempts):
+            self.tts.tts_to_file(**kwargs)
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(out_path)],
+                capture_output=True, text=True, check=True,
+            )
+            duration = float(result.stdout.strip())
+            if duration >= minimum_duration:
+                break
         return SynthResult(duration=duration, words=None)

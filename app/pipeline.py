@@ -186,9 +186,11 @@ def _renderable_signature(slide: Slide) -> dict:
 
 
 def _slide_hash(slide: Slide, tts_provider: str, voice: str, rate: str, opts: VideoOptions) -> str:
-    chatterbox_variant = ""
+    tts_variant = ""
+    if tts_provider == "coqui":
+        tts_variant = f"|xtts_retry={int(opts.coqui_retry_incomplete)}"
     if tts_provider == "chatterbox":
-        chatterbox_variant = (
+        tts_variant = (
             f"|cb_isolate={int(opts.chatterbox_sentence_isolation)}"
             f"|cb_retry={int(opts.chatterbox_retry_incomplete)}"
         )
@@ -196,7 +198,7 @@ def _slide_hash(slide: Slide, tts_provider: str, voice: str, rate: str, opts: Vi
         f"|{tts_provider}|{voice}|{rate}|{opts.width}x{opts.height}@{opts.fps}" \
         f"|sub={opts.subtitles}|fade={opts.fade_transitions}|kb={opts.ken_burns}" \
         f"|theme={opts.theme_preset}|accent={opts.accent_rgb}|reveal={opts.bullet_reveal}" \
-        f"|quality={opts.quality_preset}{chatterbox_variant}"
+        f"|quality={opts.quality_preset}{tts_variant}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -205,6 +207,7 @@ def _narration_hash(
     tts_provider: str,
     voice: str,
     rate: str,
+    coqui_retry_incomplete: bool = False,
     chatterbox_sentence_isolation: bool = False,
     chatterbox_retry_incomplete: bool = False,
 ) -> str:
@@ -221,6 +224,8 @@ def _narration_hash(
     audio automatically, with no separate "dictionary version" to track.
     """
     payload = f"{narration_for_tts}|{tts_provider}|{voice}|{rate}"
+    if tts_provider == "coqui":
+        payload += f"|xtts_retry={int(coqui_retry_incomplete)}"
     if tts_provider == "chatterbox":
         payload += (
             f"|cb_isolate={int(chatterbox_sentence_isolation)}"
@@ -289,7 +294,12 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
         raise ValueError(f"'{tts_provider_name}' motoru uzak GPU'da çalıştırılamaz (yalnızca {', '.join(REMOTE_ENGINES)}).")
     coqui_parallel = tts_provider_name == "coqui" and opts.coqui_parallel_workers > 1 and not remote_tts
     chatterbox_parallel = tts_provider_name == "chatterbox"
-    provider = None if coqui_parallel or chatterbox_parallel or remote_tts else get_provider(tts_provider_name)
+    if coqui_parallel or chatterbox_parallel or remote_tts:
+        provider = None
+    elif tts_provider_name == "coqui":
+        provider = get_provider("coqui", retry_incomplete=opts.coqui_retry_incomplete)
+    else:
+        provider = get_provider(tts_provider_name)
     pronunciation_map = pronunciation_effective_map()
 
     breadcrumbs = []
@@ -315,6 +325,7 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
             tts_provider_name,
             voice,
             rate,
+            coqui_retry_incomplete=opts.coqui_retry_incomplete,
             chatterbox_sentence_isolation=opts.chatterbox_sentence_isolation,
             chatterbox_retry_incomplete=opts.chatterbox_retry_incomplete,
         )
@@ -413,6 +424,7 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
                 opts.coqui_parallel_workers,
                 progress_cb=on_tts_progress,
                 status_cb=on_tts_status,
+                retry_incomplete=opts.coqui_retry_incomplete,
             )
         elif chatterbox_parallel:
             results = synthesize_chatterbox_parallel(

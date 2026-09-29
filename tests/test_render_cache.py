@@ -139,6 +139,19 @@ class SlideHashIgnoresMetadataFieldsTests(unittest.TestCase):
             _slide_hash(slide, "edge", "v", "+0%", guarded),
         )
 
+    def test_xtts_retry_option_only_changes_xtts_render_hash(self):
+        slide = Slide(title="Aynı slayt", narration="Aynı anlatım")
+        bare = VideoOptions()
+        guarded = VideoOptions(coqui_retry_incomplete=True)
+        self.assertNotEqual(
+            _slide_hash(slide, "coqui", "v", "+0%", bare),
+            _slide_hash(slide, "coqui", "v", "+0%", guarded),
+        )
+        self.assertEqual(
+            _slide_hash(slide, "edge", "v", "+0%", bare),
+            _slide_hash(slide, "edge", "v", "+0%", guarded),
+        )
+
 
 class WordCacheRoundTripTests(unittest.TestCase):
     def test_round_trips_word_timings_through_disk(self):
@@ -169,7 +182,7 @@ class CoquiParallelDispatchTests(unittest.TestCase):
     @patch("app.pipeline.get_provider")
     @patch("app.pipeline.synthesize_parallel")
     def test_coqui_with_multiple_workers_uses_the_parallel_path(self, fake_parallel, get_provider):
-        def fake_parallel_impl(items, n_workers, progress_cb=None, status_cb=None):
+        def fake_parallel_impl(items, n_workers, progress_cb=None, status_cb=None, retry_incomplete=False):
             for _text, _voice, out_path in items:
                 _write_fake_mp3(Path(out_path), seconds=1.0)
             return [SynthResult(duration=1.0, words=None) for _ in items]
@@ -224,7 +237,7 @@ class CoquiParallelDispatchTests(unittest.TestCase):
 
     @patch("app.pipeline.synthesize_parallel")
     def test_each_slide_receives_its_own_audio_via_the_parallel_path(self, fake_parallel):
-        def tagging_parallel(items, n_workers, progress_cb=None, status_cb=None):
+        def tagging_parallel(items, n_workers, progress_cb=None, status_cb=None, retry_incomplete=False):
             results = []
             for text, _voice, out_path in items:
                 # Slayt numarasını (metnin son karakteri) ses süresine kodlayıp
@@ -252,7 +265,7 @@ class CoquiParallelDispatchTests(unittest.TestCase):
     def test_cached_slides_are_not_resent_to_the_parallel_path(self, fake_parallel):
         call_count = {"n": 0}
 
-        def fake_parallel_impl(items, n_workers, progress_cb=None, status_cb=None):
+        def fake_parallel_impl(items, n_workers, progress_cb=None, status_cb=None, retry_incomplete=False):
             call_count["n"] += 1
             for _text, _voice, out_path in items:
                 _write_fake_mp3(Path(out_path), seconds=1.0)
@@ -277,7 +290,7 @@ class CoquiParallelDispatchTests(unittest.TestCase):
     def test_completed_audio_survives_interrupted_parallel_batch(self, fake_parallel):
         item_counts = []
 
-        def flaky_parallel(items, n_workers, progress_cb=None, status_cb=None):
+        def flaky_parallel(items, n_workers, progress_cb=None, status_cb=None, retry_incomplete=False):
             item_counts.append(len(items))
             if len(item_counts) == 1:
                 _write_fake_mp3(Path(items[0][2]), seconds=1.0)
@@ -307,7 +320,7 @@ class CoquiParallelDispatchTests(unittest.TestCase):
         uzun 2. geçiş boyunca arayüz "0/0 Başlatılıyor"da donmuş görünüyordu.
         Artık 2. geçiş de kendi (done, total_pending, "Seslendiriliyor")
         ilerlemesini raporlamalı."""
-        def fake_parallel_impl(items, n_workers, progress_cb=None, status_cb=None):
+        def fake_parallel_impl(items, n_workers, progress_cb=None, status_cb=None, retry_incomplete=False):
             for i, (_text, _voice, out_path) in enumerate(items, start=1):
                 _write_fake_mp3(Path(out_path), seconds=1.0)
                 if progress_cb:

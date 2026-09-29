@@ -34,9 +34,9 @@ def _make_fake_tts():
     return fake_tts
 
 
-def _make_provider(fake_tts):
+def _make_provider(fake_tts, *, retry_incomplete=False):
     with patch("TTS.api.TTS", return_value=fake_tts):
-        return CoquiTTSProvider(gpu=False)
+        return CoquiTTSProvider(gpu=False, retry_incomplete=retry_incomplete)
 
 
 class AudioLoadingPatchTests(unittest.TestCase):
@@ -213,9 +213,27 @@ class SynthesizeTests(unittest.TestCase):
         self.assertEqual(called_kwargs["repetition_penalty"], XTTS_REPETITION_PENALTY)
         self.assertEqual(called_kwargs["top_k"], XTTS_TOP_K)
         self.assertEqual(called_kwargs["top_p"], XTTS_TOP_P)
-        self.assertTrue(called_kwargs["split_sentences"])
+        self.assertNotIn("split_sentences", called_kwargs)
         self.assertEqual(result.duration, 12.5)
         self.assertIsNone(result.words)
+
+    def test_incomplete_retry_is_optional_and_disabled_by_default(self):
+        fake_tts = _make_fake_tts()
+        text = "Bu çıktı normalde birkaç saniye sürmesi gereken yeterince uzun bir Türkçe cümledir."
+
+        bare = _make_provider(fake_tts)
+        with patch("app.tts.coqui_provider.subprocess.run", return_value=MagicMock(stdout="0.20\n")):
+            bare.synthesize(text, "builtin:default", Path("bare.mp3"))
+        self.assertEqual(fake_tts.tts_to_file.call_count, 1)
+
+        fake_tts.reset_mock()
+        guarded = _make_provider(fake_tts, retry_incomplete=True)
+        with patch(
+            "app.tts.coqui_provider.subprocess.run",
+            side_effect=[MagicMock(stdout="0.20\n"), MagicMock(stdout="0.30\n"), MagicMock(stdout="4.00\n")],
+        ):
+            guarded.synthesize(text, "builtin:default", Path("guarded.mp3"))
+        self.assertEqual(fake_tts.tts_to_file.call_count, 3)
 
     def test_synthesize_with_cloned_voice_does_not_recompute_latents_across_slides(self):
         fake_tts = _make_fake_tts()
