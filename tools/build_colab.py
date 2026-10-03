@@ -232,6 +232,13 @@ print("GPU:", gpu or "YOK - Session options > Accelerator > GPU T4 x2 seç")
 if "P100" in gpu:
     print("UYARI: P100 bu Torch sürümünde desteklenmez; XTTS çalışmaz. Accelerator'ı GPU T4 x2 yap.")
 
+import socket
+try:
+    socket.getaddrinfo("github.com", 443)
+except OSError:
+    raise SystemExit("İnternet kapalı: sağ panelde Session options > Internet > On yap (telefon doğrulaması "
+                     "gerekebilir), sonra bu hücreyi yeniden çalıştır.")
+
 os.makedirs(os.path.dirname(REPO), exist_ok=True)
 if os.path.isdir(f"{{REPO}}/.git"):
     subprocess.run(["git", "-C", REPO, "fetch", "--depth", "1", "origin", BRANCH], check=True)
