@@ -70,3 +70,7 @@ docker-data/
 
 # Colab için üretilen paket (python tools/build_colab.py ile yeniden üretilir)
 colab/*.zip
+
+# Yerel TTS/render deneme çıktıları
+/tts_smoke_test/
+/.codex_render_xtts3.py

@@ -95,6 +95,7 @@ from app.video.slide_renderer import render_slide
 from app.video.video_builder import QUALITY_PRESETS
 from app.video.themes import THEME_LABELS
 from studio_web import access
+from studio_web.access_gate import install_access_gate
 from studio_web.batch_queue import BatchQueueStore
 from studio_web.job_store import PersistentJobStore
 
@@ -122,6 +123,12 @@ async def protect_local_mutations(request: Request, call_next):
     if request.method not in {"GET", "HEAD", "OPTIONS"} and origin and origin not in ALLOWED_BROWSER_ORIGINS:
         return JSONResponse({"detail": "Bu yerel API yalnızca Kavra arayüzünden kullanılabilir."}, status_code=403)
     return await call_next(request)
+
+
+# En son eklenen ara katman en dışta çalışır: şifresiz istek hiçbir uca ulaşmaz.
+ACCESS_TOKEN = access.access_token()
+if ACCESS_TOKEN:
+    install_access_gate(app, ACCESS_TOKEN)
 
 
 def _project_dir(project_id: str) -> Path:

@@ -64,6 +64,47 @@ class NotebookTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), build_colab.notebook(),
                              "python tools/build_colab.py çalıştır")
 
+    def test_studio_notebook_cells_are_plain_python(self):
+        code = ["".join(c["source"]) for c in build_colab.studio_notebook()["cells"] if c["cell_type"] == "code"]
+        self.assertEqual(len(code), 4)
+        for source in code:
+            self.assertFalse([l for l in source.splitlines() if l.lstrip().startswith(("!", "%"))])
+            ast.parse(source)
+        self.assertIn(build_colab.REPO_URL, code[0])
+
+    def test_committed_studio_notebook_matches_the_generator(self):
+        path = ROOT / "colab" / "Kavra_Studyo_Colab.ipynb"
+        self.assertTrue(path.exists(), "python tools/build_colab.py çalıştır")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), build_colab.studio_notebook(),
+                         "python tools/build_colab.py çalıştır")
+
+
+class ColabStudioTests(unittest.TestCase):
+    def test_server_env_exposes_only_the_tunnel_host_behind_the_token(self):
+        from tools import colab_studio
+
+        env = colab_studio.server_env("calm-river.trycloudflare.com", "x" * 24, Path("/content/kavra_data"),
+                                      root=Path("/content/Kavra"), base={"HF_HOME": "/root/.cache", "PATH": "/bin"})
+        self.assertEqual(env["KAVRA_ALLOWED_HOSTS"], "calm-river.trycloudflare.com")
+        self.assertEqual(env["KAVRA_ACCESS_TOKEN"], "x" * 24)
+        self.assertEqual(env["KAVRA_MODELS_DIR"], str(Path("/content/Kavra/models")))
+        self.assertNotIn("HF_HOME", env)  # Kavra kendi önbellek düzenini kursun
+        self.assertEqual(env["PATH"], "/bin")
+
+    def test_install_fingerprint_follows_requirements(self):
+        from tools import colab_studio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("requirements.txt", "requirements-tts.txt", "requirements-chatterbox.txt",
+                         "install_chatterbox.py"):
+                (root / name).write_text("a==1\n")
+            first = colab_studio.requirements_fingerprint(root)
+            self.assertEqual(first, colab_studio.requirements_fingerprint(root))
+            self.assertNotEqual(first, colab_studio.requirements_fingerprint(root, chatterbox=True))
+            (root / "requirements-tts.txt").write_text("a==2\n")
+            self.assertNotEqual(first, colab_studio.requirements_fingerprint(root))
+
 
 if __name__ == "__main__":
     unittest.main()

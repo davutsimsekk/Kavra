@@ -4,7 +4,9 @@
 
 Çıktılar (colab/ klasörü):
   kavra-tts-bundle.zip        Colab'a yüklenecek sunucu paketi
-  Kavra_TTS_Sunucusu.ipynb    Colab'da açılacak not defteri
+  Kavra_TTS_Sunucusu.ipynb    Colab'da açılacak not defteri (yalnız uzak TTS)
+  Kavra_Studyo_Colab.ipynb    Tüm stüdyoyu GitHub'dan kurup yayınlayan not defteri
+                              (depoya commit'lenir; Colab doğrudan GitHub'dan açar)
 """
 from __future__ import annotations
 
@@ -134,6 +136,66 @@ except KeyboardInterrupt:
     print("Durduruldu.")'''
 
 
+REPO_URL = "https://github.com/davutsimsekk/Kavra.git"
+
+STUDIO_INTRO = """# Kavra stüdyosu (Colab, GPU)
+
+Kavra'nın **tamamını** (arayüz + video render + XTTS v2/Anka/Piper, istersen Chatterbox) Colab GPU'sunda kurar
+ve cloudflared ile internete açar. Bilgisayarında hiçbir şey çalışmasına gerek yok.
+
+1. **Çalışma zamanı → Çalışma zamanı türünü değiştir → T4 GPU** (veya daha iyisi).
+2. Hücreleri sırayla çalıştır. İlk kurulum ~10-15 dk sürer; aynı oturumda tekrar çalıştırınca atlanır.
+3. 2. hücrenin yazdırdığı **bağlantıyı** aç: arayüz şifreyle korunur, bağlantı şifreyi içerir — kimseyle paylaşma.
+4. Videonu üret, indir; bitince 4. hücreyle kapat (GPU kotan boşa gitmez).
+
+**İsteğe bağlı (sol menü → Secrets 🔑, not defterine erişim ver):**
+- `KAVRA_ERISIM_SIFRESI` — her oturumda aynı kalan şifre (en az 16 karakter). Yoksa her seferinde rastgele üretilir.
+- `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` — anlatı/seslendirme anahtarları (arayüzden de girilebilir).
+
+> Ses ayarlarında *Çalıştırma yeri* **Bu bilgisayar** kalmalı: burada "bu bilgisayar" Colab'ın GPU'su.
+> `DRIVE_KAYDET` açık değilse projeler oturum kapanınca silinir — videonu kapatmadan önce indir."""
+
+STUDIO_INSTALL = f'''# 1) Depoyu GitHub'dan çek ve kur
+REPO_URL = "{REPO_URL}"  # @param {{type:"string"}}
+BRANCH = "main"  # @param {{type:"string"}}
+CHATTERBOX_KUR = False  # @param {{type:"boolean"}}
+
+import os, subprocess, sys
+
+REPO = "/content/Kavra"
+gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                     capture_output=True, text=True).stdout.strip()
+print("GPU:", gpu or "YOK - Çalışma zamanı türünü GPU yap (CPU'da da çalışır ama XTTS çok yavaş olur)")
+
+if os.path.isdir(f"{{REPO}}/.git"):
+    subprocess.run(["git", "-C", REPO, "fetch", "--depth", "1", "origin", BRANCH], check=True)
+    subprocess.run(["git", "-C", REPO, "reset", "--hard", "FETCH_HEAD"], check=True)
+else:
+    subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH, REPO_URL, REPO], check=True)
+print(subprocess.run(["git", "-C", REPO, "log", "-1", "--oneline"], capture_output=True, text=True).stdout)
+
+sys.path.insert(0, REPO)
+from tools import colab_studio
+colab_studio.install(chatterbox=CHATTERBOX_KUR)'''
+
+STUDIO_START = '''# 2) Kavra'yı başlat ve internete aç
+DRIVE_KAYDET = False  # @param {type:"boolean"}
+
+studio = colab_studio.start(use_drive=DRIVE_KAYDET)'''
+
+STUDIO_WATCH = '''# 3) Açık tut: sunucuyu ve tüneli izler, düşerse yeniden başlatır (■ ile izlemeyi bırakabilirsin)
+studio.watch()'''
+
+STUDIO_STOP = '''# 4) Bitti mi? Önce 3. hücreyi ■ ile durdur, sonra bunu çalıştır: Kavra kapanır, GPU serbest kalır.
+# Drive'a kaydetmediysen indirmediğin videolar silinir!
+CALISMA_ZAMANINI_KAPAT = True  # @param {type:"boolean"}
+
+studio.stop()
+if CALISMA_ZAMANINI_KAPAT:
+    from google.colab import runtime
+    runtime.unassign()'''
+
+
 def _cell(kind: str, source: str) -> dict:
     cell = {"cell_type": kind, "metadata": {}, "source": source.splitlines(keepends=True)}
     if kind == "code":
@@ -141,20 +203,28 @@ def _cell(kind: str, source: str) -> dict:
     return cell
 
 
-def notebook() -> dict:
-    cells = [_cell("markdown", INTRO)] + [
-        _cell("code", src) for src in (STEP_UPLOAD, STEP_INSTALL, STEP_SERVER, STEP_TUNNEL, STEP_KEEPALIVE)
-    ]
+def _notebook(name: str, intro: str, steps: tuple[str, ...]) -> dict:
+    cells = [_cell("markdown", intro)] + [_cell("code", src) for src in steps]
     return {
         "cells": cells,
         "metadata": {
             "accelerator": "GPU",
-            "colab": {"name": "Kavra_TTS_Sunucusu.ipynb", "provenance": []},
+            "colab": {"name": name, "provenance": []},
             "kernelspec": {"display_name": "Python 3", "name": "python3"},
         },
         "nbformat": 4,
         "nbformat_minor": 0,
     }
+
+
+def notebook() -> dict:
+    return _notebook("Kavra_TTS_Sunucusu.ipynb", INTRO,
+                     (STEP_UPLOAD, STEP_INSTALL, STEP_SERVER, STEP_TUNNEL, STEP_KEEPALIVE))
+
+
+def studio_notebook() -> dict:
+    return _notebook("Kavra_Studyo_Colab.ipynb", STUDIO_INTRO,
+                     (STUDIO_INSTALL, STUDIO_START, STUDIO_WATCH, STUDIO_STOP))
 
 
 def build_bundle(target: Path) -> Path:
@@ -169,7 +239,9 @@ def main() -> None:
     OUT.mkdir(exist_ok=True)
     bundle = build_bundle(OUT / "kavra-tts-bundle.zip")
     (OUT / "Kavra_TTS_Sunucusu.ipynb").write_text(json.dumps(notebook(), ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"Yazıldı: {bundle} ({bundle.stat().st_size // 1024} KB) ve Kavra_TTS_Sunucusu.ipynb")
+    (OUT / "Kavra_Studyo_Colab.ipynb").write_text(
+        json.dumps(studio_notebook(), ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"Yazıldı: {bundle} ({bundle.stat().st_size // 1024} KB), Kavra_TTS_Sunucusu.ipynb ve Kavra_Studyo_Colab.ipynb")
 
 
 if __name__ == "__main__":

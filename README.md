@@ -48,6 +48,15 @@ Arayüz: `http://127.0.0.1:8768`. GPU'suz bir sunucuya kuruyorsan `.env`'e `KAVR
 Sunucuda/VPS'te çalıştırmanın tam adımları (Tailscale, güvenlik, mevcut siteyle birlikte
 çalıştırma): [DOCKER.md](DOCKER.md).
 
+### Google Colab'da (kurulum yok, ücretsiz GPU)
+
+[![Colab'da aç](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/davutsimsekk/Kavra/blob/main/colab/Kavra_Studyo_Colab.ipynb)
+
+Not defteri depoyu GitHub'dan çeker, her şeyi GPU'lu ortama kurar ve cloudflared ile internete açar.
+Çalışma zamanını **GPU** yap, hücreleri sırayla çalıştır, yazdırılan bağlantıyı aç (arayüz şifreyle
+korunur), videonu üretip indir, son hücreyle kapat. Projelerin oturumlar arasında kalması için
+`DRIVE_KAYDET`'i aç. Not defteri `python tools/build_colab.py` ile yeniden üretilir.
+
 ### Windows'ta yerel kurulum
 
 Gereken: Python 3.14, Node.js 22+, FFmpeg.

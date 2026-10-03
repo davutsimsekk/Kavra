@@ -53,5 +53,58 @@ class AllowedHostsTests(unittest.TestCase):
                 access.allowed_origins({"KAVRA_ALLOWED_ORIGINS": bad})
 
 
+class AccessTokenTests(unittest.TestCase):
+    TOKEN = "dogru-sifre-1234567890"
+
+    def test_token_is_optional_but_must_be_long(self):
+        self.assertIsNone(access.access_token({}))
+        self.assertIsNone(access.access_token({"KAVRA_ACCESS_TOKEN": "  "}))
+        self.assertEqual(access.access_token({"KAVRA_ACCESS_TOKEN": f" {self.TOKEN} "}), self.TOKEN)
+        with self.assertRaises(access.AccessConfigError):
+            access.access_token({"KAVRA_ACCESS_TOKEN": "kisa"})
+
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from studio_web.access_gate import install_access_gate
+
+        app = FastAPI()
+
+        @app.get("/api/ping")
+        def ping():
+            return {"ok": True}
+
+        @app.get("/")
+        def index():
+            return {"page": "index"}
+
+        install_access_gate(app, self.TOKEN)
+        return TestClient(app)
+
+    def test_gate_blocks_requests_without_token(self):
+        client = self._client()
+        self.assertEqual(client.get("/api/ping").status_code, 401)
+        page = client.get("/")
+        self.assertEqual(page.status_code, 401)
+        self.assertIn('name="key"', page.text)
+        self.assertEqual(client.get("/?key=yanlis-sifre-000000").status_code, 401)
+        self.assertEqual(client.get("/api/ping", headers={"Authorization": "Bearer yanlis"}).status_code, 401)
+        self.assertEqual(client.get("/api/ping", cookies={access.ACCESS_COOKIE: self.TOKEN}).status_code, 401)
+
+    def test_key_link_sets_session_cookie_and_strips_token_from_url(self):
+        client = self._client()
+        response = client.get(f"/?key={self.TOKEN}&tab=video", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/?tab=video")
+        self.assertNotIn(self.TOKEN, response.headers["set-cookie"])
+        self.assertIn("httponly", response.headers["set-cookie"].lower())
+        self.assertEqual(client.get("/api/ping").json(), {"ok": True})
+
+    def test_bearer_header_is_accepted_for_scripts(self):
+        client = self._client()
+        response = client.get("/api/ping", headers={"Authorization": f"Bearer {self.TOKEN}"})
+        self.assertEqual(response.json(), {"ok": True})
+
+
 if __name__ == "__main__":
     unittest.main()

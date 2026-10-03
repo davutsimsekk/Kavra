@@ -10,12 +10,19 @@ değişkenleriyle eklenir:
   KAVRA_PUBLISHED_PORT   Docker'ın ana makinede yayımladığı port (compose KAVRA_PORT'tan gelir);
                          127.0.0.1/localhost için o portun origin'i de kabul edilir.
 
-Bu değerler kimlik doğrulama yerine geçmez: API'nin kendi girişi yoktur, erişimi
-ağ katmanı (Tailscale, güvenlik duvarı) kısıtlamalıdır. Bu yüzden joker ("*")
-kabul edilmez.
+Bu değerler kimlik doğrulama yerine geçmez: varsayılan kurulumda API'nin kendi girişi
+yoktur, erişimi ağ katmanı (Tailscale, güvenlik duvarı) kısıtlamalıdır. Bu yüzden joker
+("*") kabul edilmez.
+
+  KAVRA_ACCESS_TOKEN     verilirse arayüz ve API yalnız bu şifreyi bilenlere açılır
+                         (en az 16 karakter). Kavra herkese açık bir adresten (örn. Colab +
+                         cloudflared) yayınlanırken kullanılır; tarayıcı bir kez
+                         ``/?key=<şifre>`` ile ya da giriş formundan girer, sonrası çerezle sürer.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from urllib.parse import urlsplit
 
@@ -84,3 +91,30 @@ def allowed_origins(env: dict[str, str] | None = None) -> set[str]:
         for host in extra_hosts(env):
             origins.update({f"https://{host}", f"http://{host}"})
     return origins
+
+
+ACCESS_COOKIE = "kavra_access"
+MIN_ACCESS_TOKEN_LENGTH = 16
+
+
+def access_token(env: dict[str, str] | None = None) -> str | None:
+    env = os.environ if env is None else env
+    token = (env.get("KAVRA_ACCESS_TOKEN") or "").strip()
+    if not token:
+        return None
+    if len(token) < MIN_ACCESS_TOKEN_LENGTH:
+        raise AccessConfigError(f"KAVRA_ACCESS_TOKEN en az {MIN_ACCESS_TOKEN_LENGTH} karakter olmalı.")
+    return token
+
+
+def session_value(token: str) -> str:
+    """Çereze şifrenin kendisi yerine ondan türetilmiş değer yazılır."""
+    return hmac.new(token.encode(), b"kavra-session", hashlib.sha256).hexdigest()
+
+
+def token_matches(candidate: str | None, token: str) -> bool:
+    return bool(candidate) and hmac.compare_digest(candidate.encode(), token.encode())
+
+
+def session_matches(candidate: str | None, token: str) -> bool:
+    return bool(candidate) and hmac.compare_digest(candidate.encode(), session_value(token).encode())
