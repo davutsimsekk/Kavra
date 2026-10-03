@@ -91,6 +91,17 @@ class ColabStudioTests(unittest.TestCase):
         self.assertNotIn("HF_HOME", env)  # Kavra kendi önbellek düzenini kursun
         self.assertEqual(env["PATH"], "/bin")
 
+    def test_apt_packages_are_checked_one_by_one(self):
+        """Colab'da ffmpeg hazır gelir ama fontlar gelmez; ffmpeg varlığı font kurulumunu atlatmamalı."""
+        from tools import colab_studio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            present = Path(tmp) / "ffmpeg"
+            present.touch()
+            packages = {"ffmpeg": str(present), "fonts-dejavu-core": str(Path(tmp) / "DejaVuSans-Bold.ttf")}
+            self.assertEqual(colab_studio.missing_apt_packages(packages), ["fonts-dejavu-core"])
+        self.assertIn("fonts-dejavu-core", colab_studio.APT_PACKAGES)
+
     def test_install_fingerprint_follows_requirements(self):
         from tools import colab_studio
 

@@ -174,8 +174,11 @@ else:
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH, REPO_URL, REPO], check=True)
 print(subprocess.run(["git", "-C", REPO, "log", "-1", "--oneline"], capture_output=True, text=True).stdout)
 
-sys.path.insert(0, REPO)
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+import importlib
 from tools import colab_studio
+colab_studio = importlib.reload(colab_studio)  # hücre yeniden çalışınca çekilen yeni kod kullanılsın
 colab_studio.install(chatterbox=CHATTERBOX_KUR)'''
 
 STUDIO_START = '''# 2) Kavra'yı başlat ve internete aç

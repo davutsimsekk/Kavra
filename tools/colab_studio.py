@@ -43,6 +43,13 @@ PYTHON_VERSION = "3.14"
 NODE_MAJOR = 22
 INSTALL_STAMP = VENV / ".kavra_install"
 SECRET_KEYS = ("GEMINI_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY")
+# apt paketi -> kurulu olduğunu gösteren dosya. Colab'da ffmpeg hazır gelir ama slayt
+# fontları (app/video/slide_renderer.py) gelmez; her biri ayrı denetlenmeli.
+APT_PACKAGES = {
+    "ffmpeg": "/usr/bin/ffmpeg",
+    "fonts-dejavu-core": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "libsndfile1": "/usr/lib/x86_64-linux-gnu/libsndfile.so.1",
+}
 
 
 def run(command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
@@ -115,11 +122,16 @@ def build_webui(root: Path = ROOT) -> None:
     run(["npm", "run", "build"], cwd=root / "webui", env=env)
 
 
+def missing_apt_packages(packages: dict[str, str] = APT_PACKAGES) -> list[str]:
+    return [name for name, marker in packages.items() if not Path(marker).exists()]
+
+
 def install(chatterbox: bool = False, root: Path = ROOT) -> None:
     """Gerekenleri kurar; aynı gereksinimlerle ikinci kez çağrılırsa yalnız arayüzü yeniden derler."""
-    if not shutil.which("ffmpeg"):
+    missing = missing_apt_packages()
+    if missing:
         run(["apt-get", "-qq", "update"])
-        run(["apt-get", "-qq", "install", "-y", "ffmpeg", "fonts-dejavu-core", "libsndfile1"])
+        run(["apt-get", "-qq", "install", "-y", *missing])
 
     fingerprint = requirements_fingerprint(root, chatterbox)
     if INSTALL_STAMP.exists() and INSTALL_STAMP.read_text() == fingerprint:
