@@ -24,7 +24,10 @@ models/*
 !models/chatterbox_speakers/
 models/chatterbox_speakers/*
 !models/chatterbox_speakers/*.wav
-/models/chatterbox_speakers/turkce_erkek_referans.wav
+# XTTS'in varsayılan klon sesi (Doğa) Colab/Kaggle kurulumlarında da gelsin.
+!models/voice_references/
+models/voice_references/*
+!models/voice_references/Doga_Upbeat_Rich.wav
 
 # Yerel ses karşılaştırma çıktıları; çalışma zamanı bunları kullanmaz.
 /ses_ornekleri_erkek_xtts/
