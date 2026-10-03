@@ -342,9 +342,17 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
             "fully_cached": False, "audio_reused": False, "synth": None,
         }
 
+        # Slayt hash'i ham anlatımı kapsar; telaffuz sözlüğü yalnız narration hash'ine
+        # girer. Bu yüzden sözlük değişince slayt "tamamen önbellekte" sayılmamalı.
+        # Hash dosyası olmayan eski önbellekler geçerli sayılır ki hepsi baştan üretilmesin.
+        narration_unchanged = (
+            not entry["narration_hash_file"].exists()
+            or entry["narration_hash_file"].read_text().strip() == narration_hash
+        )
         if (
             not force_audio
             and entry["hash_file"].exists() and entry["hash_file"].read_text().strip() == h
+            and narration_unchanged
             and entry["seg_path"].exists() and entry["audio_path"].exists()
         ):
             entry["fully_cached"] = True

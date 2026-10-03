@@ -410,3 +410,35 @@ class ThemeChangeReusesAudioTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PronunciationChangeRerendersTests(unittest.TestCase):
+    """Video bir kez render edildikten sonra sözlüğe eklenen kelimeler "Videoyu güncelle"de
+    devreye girmeli. Eskiden slayt hash'i ham anlatımı kullandığından sözlük değişince
+    slayt "tamamen önbellekte" sayılıyor, eski ses ve video parçası olduğu gibi kalıyordu."""
+
+    @patch("app.pipeline.get_provider")
+    def test_dictionary_added_after_first_render_reaches_the_tts_on_update(self, get_provider):
+        texts = []
+
+        class RecordingProvider(FakeProvider):
+            def synthesize(self, text, voice, out_path, rate="+0%"):
+                texts.append(text)
+                return super().synthesize(text, voice, out_path, rate)
+
+        get_provider.return_value = RecordingProvider()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("app.pipeline.PROJECTS_DIR", Path(tmp)):
+                pdir = project_dir_for("sozluk-sonradan-proje")
+                slides = [Slide(title="A", narration="switch yapısı"), Slide(title="B", narration="if yapısı")]
+                save_script(pdir, slides)
+                opts = VideoOptions(theme_preset="notebook")
+                with patch("app.pipeline.pronunciation_effective_map", return_value={}):
+                    render_video(pdir, slides, "edge", "tr-TR-AhmetNeural", "+0%", opts)
+                self.assertEqual(texts, ["switch yapısı", "if yapısı"])
+
+                texts.clear()
+                with patch("app.pipeline.pronunciation_effective_map", return_value={"switch": "sviç"}):
+                    render_video(pdir, slides, "edge", "tr-TR-AhmetNeural", "+0%", opts)
+
+        self.assertEqual(texts, ["sviç yapısı"], "yalnız sözlükten etkilenen slayt yeniden seslendirilmeli")
