@@ -64,6 +64,18 @@ def _select_cuda_device(worker_index: int) -> int | None:
     return device
 
 
+def parallel_status(engine: str, worker_total: int, done: int, total: int, active: dict[int, int]) -> str:
+    """Paralel üretim durumu: biten sayısı hiç geri gitmez, süren slaytlar ayrıca listelenir.
+
+    Slaytlar worker'lara sırayla dağıtıldığı ve worker'lar farklı hızda ilerlediği için
+    "en son başlayan slayt" numarası geri gidiyormuş gibi görünür (56/63'ten 46/63'e);
+    bu yüzden tek bir numara yerine tamamlanan sayı gösterilir."""
+    text = f"{engine} {worker_total}× seslendiriliyor · {done}/{total} slayt bitti"
+    if active:
+        text += " · sürüyor: " + ", ".join(str(idx + 1) for idx in sorted(active.values()))
+    return text
+
+
 # Ana döngünün olay beklerken uyanma aralığı (saniye) — testler küçültür.
 _POLL_SECONDS = 2
 # Bir model yüklemesi bu süreyi aşarsa (ör. takılmış bir checkpoint okuması) o worker'ın
@@ -199,6 +211,7 @@ def _run_workers(
     ready: set[int] = set()
     outcomes: dict[int, tuple[bool, bool, str | None]] = {}
     state = {"loading_stopped": False, "loading_started_at": time.monotonic()}
+    active: dict[int, int] = {}  # worker -> şu an seslendirdiği slayt indeksi
 
     def start_next_worker() -> None:
         number = len(procs) + 1
@@ -310,14 +323,20 @@ def _run_workers(
                 recoverable = number > 1 or _is_oom_text(extra)
                 fail_items([number], detail, recoverable)
                 stop_loading(detail, recoverable)
-            elif kind_state == "started" and status_cb:
-                status_cb(f"XTTS {worker_total}× seslendiriliyor · slayt {extra + 1}/{total_items} başladı")
+            elif kind_state == "started":
+                active[number] = extra
+                if status_cb:
+                    status_cb(parallel_status("XTTS", worker_total, len(outcomes), total_items, active))
             continue
 
         _kind, idx, ok, is_oom, detail = event
         if idx in outcomes:
             continue
         outcomes[idx] = (ok, is_oom, detail)
+        for number in [n for n, current in active.items() if current == idx]:
+            del active[number]
+        if status_cb:
+            status_cb(parallel_status("XTTS", worker_total, len(outcomes), total_items, active))
         if ok and progress_cb:
             successful = sum(1 for result in outcomes.values() if result[0])
             progress_cb(successful, total_items)

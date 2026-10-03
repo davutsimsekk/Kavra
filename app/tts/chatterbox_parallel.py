@@ -20,6 +20,7 @@ from pathlib import Path
 from app.config import CACHE_DIR, ROOT
 from app.tts.base import local_engine_unavailable
 from app.models import SynthResult
+from app.tts.coqui_parallel import parallel_status
 
 
 MAX_PARALLEL_WORKERS = 2
@@ -132,6 +133,7 @@ def _run_workers(
         diagnostics: dict[int, list[str]] = {number: [] for number, *_rest in workers}
         total = sum(len(group) for group in non_empty)
         completed = 0
+        active: dict[int, int] = {}  # worker -> şu an seslendirdiği slayt indeksi
         ready_workers: set[int] = set()
         closed_workers: set[int] = set()
         if status_cb:
@@ -210,11 +212,10 @@ def _run_workers(
                             f"Chatterbox {len(workers)}× modelleri yükleniyor · "
                             f"{len(ready_workers)}/{len(workers)} hazır"
                         )
-                elif state == "started" and status_cb:
-                    status_cb(
-                        f"Chatterbox {len(workers)}× seslendiriliyor · "
-                        f"slayt {int(event['index']) + 1}/{total} başladı"
-                    )
+                elif state == "started":
+                    active[worker_number] = int(event["index"])
+                    if status_cb:
+                        status_cb(parallel_status("Chatterbox", len(workers), len(outcomes), total, active))
                 continue
 
             if event.get("type") == "result":
@@ -224,6 +225,10 @@ def _run_workers(
                 ok = bool(event["ok"])
                 outcomes[index] = (ok, bool(event["oom"]), event.get("detail"))
                 completed += 1
+                for number in [n for n, current in active.items() if current == index]:
+                    del active[number]
+                if status_cb:
+                    status_cb(parallel_status("Chatterbox", len(workers), len(outcomes), total, active))
                 if ok and progress_cb:
                     successful = sum(1 for result in outcomes.values() if result[0])
                     progress_cb(successful, total)

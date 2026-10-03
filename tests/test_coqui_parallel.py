@@ -358,6 +358,19 @@ class RunWorkersOrchestrationTests(unittest.TestCase):
 
         return worker
 
+    def test_parallel_progress_status_never_goes_backwards(self):
+        """2x GPU'da worker'lar farklı hızda ilerler; eskiden "slayt 56/63 başladı" yazısı
+        en son başlayan slaytı gösterdiği için 46/63'e geri düşüyordu."""
+        import re
+
+        outcomes = self._run({}, item_count=12, workers=3)
+        self.assertEqual(len(outcomes), 12)
+        progress = [s for s in self.statuses if "slayt bitti" in s]
+        done = [int(re.search(r"(\d+)/12 slayt bitti", s).group(1)) for s in progress]
+        self.assertEqual(done, sorted(done), "biten slayt sayısı hiç geri gitmemeli")
+        self.assertEqual(done[-1], 12)
+        self.assertFalse([s for s in self.statuses if "başladı" in s])
+
     def _run(self, behaviors, retry=False, watchdog=10.0, **kwargs):
         holder = {}
 
@@ -494,3 +507,12 @@ class MultiGpuAndLimitTests(unittest.TestCase):
         cpu = types.SimpleNamespace(is_available=lambda: False)
         with patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=cpu)}):
             self.assertIsNone(cp._select_cuda_device(1))
+
+
+class ParallelStatusTextTests(unittest.TestCase):
+    def test_lists_running_slides_in_order_next_to_a_monotonic_done_count(self):
+        from app.tts.coqui_parallel import parallel_status
+
+        text = parallel_status("XTTS", 2, 45, 63, {1: 55, 2: 45})
+        self.assertEqual(text, "XTTS 2× seslendiriliyor · 45/63 slayt bitti · sürüyor: 46, 56")
+        self.assertEqual(parallel_status("XTTS", 2, 63, 63, {}), "XTTS 2× seslendiriliyor · 63/63 slayt bitti")
