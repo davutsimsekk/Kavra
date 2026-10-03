@@ -1,6 +1,7 @@
-"""Kavra stüdyosunun tamamını Google Colab'da kurup cloudflared ile yayınlar.
+"""Kavra stüdyosunun tamamını Google Colab'da veya Kaggle'da kurup cloudflared ile yayınlar.
 
-``colab/Kavra_Studyo_Colab.ipynb`` not defteri bu modülü kullanır; mantık burada
+``colab/Kavra_Studyo_Colab.ipynb`` ve ``colab/Kavra_Studyo_Kaggle.ipynb`` not defterleri
+bu modülü kullanır; mantık burada
 durur ki not defteri hücreleri kısa kalsın ve test edilebilsin. Yalnız standart
 kütüphaneyi kullanır: Colab'ın kendi Python'unda çalışır, Kavra ise Dockerfile'daki
 gibi ayrı bir Python 3.14 ortamında koşar.
@@ -30,14 +31,24 @@ from urllib.parse import urlsplit
 
 from tts_server.colab_tunnel import start_tunnel
 
+
+def on_kaggle() -> bool:
+    return bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE")) or Path("/kaggle/working").is_dir()
+
+
 ROOT = Path(__file__).resolve().parent.parent
-VENV = Path("/content/kavra-venv")
+# Kaggle'da /kaggle/working 20 GB'lık "çıktı" alanıdır; ağır ortam (venv, önbellek,
+# modeller) oraya sığmaz ve çıktıyı şişirir. Yalnız kullanıcı verisi (projeler,
+# videolar) orada durur ki Output panelinden de indirilebilsin.
+KAGGLE = on_kaggle()
+BASE = Path("/root/kavra") if KAGGLE else Path("/content")
+VENV = BASE / "kavra-venv"
 VENV_PY = VENV / "bin" / "python"
-NODE_DIR = Path("/content/node")
-CACHE_DIR = Path("/content/kavra_cache")
-LOCAL_DATA_DIR = Path("/content/kavra_data")
+NODE_DIR = BASE / "node"
+CACHE_DIR = BASE / "kavra_cache"
+LOCAL_DATA_DIR = Path("/kaggle/working/kavra_data") if KAGGLE else BASE / "kavra_data"
 DRIVE_DATA_DIR = Path("/content/drive/MyDrive/Kavra")
-LOG_PATH = Path("/content/kavra_server.log")
+LOG_PATH = BASE / "kavra_server.log"
 PORT = 8768
 PYTHON_VERSION = "3.14"
 NODE_MAJOR = 22
@@ -66,10 +77,14 @@ def run(command: list[str], cwd: Path | None = None, env: dict[str, str] | None 
 
 
 def colab_secret(name: str) -> str | None:
+    """Colab Secrets'tan ya da Kaggle'ın Add-ons → Secrets bölümünden okur."""
     try:
+        if KAGGLE:
+            from kaggle_secrets import UserSecretsClient  # type: ignore[import-not-found]
+            return (UserSecretsClient().get_secret(name) or "").strip() or None
         from google.colab import userdata  # type: ignore[import-not-found]
         return (userdata.get(name) or "").strip() or None
-    except Exception:  # sır yok, not defterine erişim izni verilmedi ya da Colab dışında
+    except Exception:  # sır yok, not defterine erişim izni verilmedi ya da not defteri dışında
         return None
 
 
@@ -128,6 +143,7 @@ def missing_apt_packages(packages: dict[str, str] = APT_PACKAGES) -> list[str]:
 
 def install(chatterbox: bool = False, root: Path = ROOT) -> None:
     """Gerekenleri kurar; aynı gereksinimlerle ikinci kez çağrılırsa yalnız arayüzü yeniden derler."""
+    BASE.mkdir(parents=True, exist_ok=True)
     missing = missing_apt_packages()
     if missing:
         run(["apt-get", "-qq", "update"])
@@ -155,7 +171,7 @@ def install(chatterbox: bool = False, root: Path = ROOT) -> None:
 
 
 def data_dir(use_drive: bool) -> Path:
-    if not use_drive:
+    if not use_drive or KAGGLE:
         return LOCAL_DATA_DIR
     if not Path("/content/drive/MyDrive").is_dir():
         from google.colab import drive  # type: ignore[import-not-found]
@@ -219,6 +235,7 @@ class Studio:
 
     def start_server(self) -> None:
         self.stop_server()
+        BASE.mkdir(parents=True, exist_ok=True)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.data.mkdir(parents=True, exist_ok=True)
         self._log = open(LOG_PATH, "a", encoding="utf-8")

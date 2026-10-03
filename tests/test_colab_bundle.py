@@ -78,6 +78,21 @@ class NotebookTests(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), build_colab.studio_notebook(),
                          "python tools/build_colab.py çalıştır")
 
+    def test_kaggle_notebook_cells_are_plain_python_and_avoid_colab_apis(self):
+        code = ["".join(c["source"]) for c in build_colab.kaggle_notebook()["cells"] if c["cell_type"] == "code"]
+        self.assertEqual(len(code), 4)
+        for source in code:
+            self.assertFalse([l for l in source.splitlines() if l.lstrip().startswith(("!", "%"))])
+            self.assertNotIn("google.colab", source)
+            self.assertNotIn("/content", source)
+            ast.parse(source)
+
+    def test_committed_kaggle_notebook_matches_the_generator(self):
+        path = ROOT / "colab" / "Kavra_Studyo_Kaggle.ipynb"
+        self.assertTrue(path.exists(), "python tools/build_colab.py çalıştır")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), build_colab.kaggle_notebook(),
+                         "python tools/build_colab.py çalıştır")
+
 
 class ColabStudioTests(unittest.TestCase):
     def test_server_env_exposes_only_the_tunnel_host_behind_the_token(self):

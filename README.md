@@ -57,6 +57,9 @@ Not defteri depoyu GitHub'dan çeker, her şeyi GPU'lu ortama kurar ve cloudflar
 korunur), videonu üretip indir, son hücreyle kapat. Projelerin oturumlar arasında kalması için
 `DRIVE_KAYDET`'i aç. Not defteri `python tools/build_colab.py` ile yeniden üretilir.
 
+Kaggle'da da aynısı çalışır: [Kaggle'da aç](https://kaggle.com/kernels/welcome?src=https://github.com/davutsimsekk/Kavra/blob/main/colab/Kavra_Studyo_Kaggle.ipynb)
+(`colab/Kavra_Studyo_Kaggle.ipynb`). Session options'da **GPU T4 x2** (P100 değil) ve **Internet: On** seç.
+
 ### Windows'ta yerel kurulum
 
 Gereken: Python 3.14, Node.js 22+, FFmpeg.

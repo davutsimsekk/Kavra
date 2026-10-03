@@ -7,6 +7,7 @@
   Kavra_TTS_Sunucusu.ipynb    Colab'da açılacak not defteri (yalnız uzak TTS)
   Kavra_Studyo_Colab.ipynb    Tüm stüdyoyu GitHub'dan kurup yayınlayan not defteri
                               (depoya commit'lenir; Colab doğrudan GitHub'dan açar)
+  Kavra_Studyo_Kaggle.ipynb   Aynısının Kaggle sürümü (yollar, Secrets ve kapatma farklı)
 """
 from __future__ import annotations
 
@@ -199,6 +200,62 @@ if CALISMA_ZAMANINI_KAPAT:
     runtime.unassign()'''
 
 
+KAGGLE_INTRO = '''# Kavra stüdyosu (Kaggle, GPU)
+
+Kavra'nın **tamamını** (arayüz + video render + XTTS v2/Anka/Piper, istersen Chatterbox) Kaggle GPU'sunda kurar
+ve cloudflared ile internete açar.
+
+1. Sağ paneldeki **Session options**'da: **Accelerator → GPU T4 x2** seç (**P100 seçme**: projedeki CUDA 12.8 Torch
+   Pascal kartları desteklemez) ve **Internet → On** yap (telefon doğrulaması ister).
+2. Hücreleri sırayla çalıştır. İlk kurulum ~10-15 dk sürer; aynı oturumda tekrar çalıştırınca atlanır.
+3. 2. hücrenin yazdırdığı **bağlantıyı** aç: arayüz şifreyle korunur, bağlantı şifreyi içerir — kimseyle paylaşma.
+4. Videonu üret, indir; bitince 4. hücreyi çalıştır ve oturumu **Stop session** ile kapat (GPU kotan boşa gitmez).
+
+**İsteğe bağlı (Add-ons → Secrets, not defterine bağla):**
+- `KAVRA_ERISIM_SIFRESI` — her oturumda aynı kalan şifre (en az 16 karakter). Yoksa her seferinde rastgele üretilir.
+- `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` — anlatı/seslendirme anahtarları (arayüzden de girilebilir).
+
+> Ses ayarlarında *Çalıştırma yeri* **Bu bilgisayar** kalmalı: burada "bu bilgisayar" Kaggle'ın GPU'su.
+> Projeler `/kaggle/working/kavra_data` altında durur; oturum kapanınca silinir — videonu kapatmadan önce indir.'''
+
+KAGGLE_INSTALL = f'''# 1) Depoyu GitHub'dan çek ve kur
+REPO_URL = "{REPO_URL}"
+BRANCH = "main"
+CHATTERBOX_KUR = False
+
+import os, subprocess, sys
+
+REPO = "/root/kavra/Kavra"
+gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+                     capture_output=True, text=True).stdout.strip()
+print("GPU:", gpu or "YOK - Session options > Accelerator > GPU T4 x2 seç")
+if "P100" in gpu:
+    print("UYARI: P100 bu Torch sürümünde desteklenmez; XTTS çalışmaz. Accelerator'ı GPU T4 x2 yap.")
+
+os.makedirs(os.path.dirname(REPO), exist_ok=True)
+if os.path.isdir(f"{{REPO}}/.git"):
+    subprocess.run(["git", "-C", REPO, "fetch", "--depth", "1", "origin", BRANCH], check=True)
+    subprocess.run(["git", "-C", REPO, "reset", "--hard", "FETCH_HEAD"], check=True)
+else:
+    subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH, REPO_URL, REPO], check=True)
+print(subprocess.run(["git", "-C", REPO, "log", "-1", "--oneline"], capture_output=True, text=True).stdout)
+
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+import importlib
+from tools import colab_studio
+colab_studio = importlib.reload(colab_studio)  # hücre yeniden çalışınca çekilen yeni kod kullanılsın
+assert colab_studio.KAGGLE, "Bu not defteri Kaggle içindir; Colab'da Kavra_Studyo_Colab.ipynb'yi aç."
+colab_studio.install(chatterbox=CHATTERBOX_KUR)'''
+
+KAGGLE_START = '''# 2) Kavra'yı başlat ve internete aç
+studio = colab_studio.start()'''
+
+KAGGLE_STOP = '''# 4) Bitti mi? Önce 3. hücreyi ■ ile durdur, sonra bunu çalıştır; ardından sağ üstten Stop session.
+# İndirmediğin videolar oturum kapanınca silinir!
+studio.stop()'''
+
+
 def _cell(kind: str, source: str) -> dict:
     cell = {"cell_type": kind, "metadata": {}, "source": source.splitlines(keepends=True)}
     if kind == "code":
@@ -206,7 +263,7 @@ def _cell(kind: str, source: str) -> dict:
     return cell
 
 
-def _notebook(name: str, intro: str, steps: tuple[str, ...]) -> dict:
+def _notebook(name: str, intro: str, steps: tuple[str, ...]) -> dict:  # Colab ve Kaggle ikisi de okur
     cells = [_cell("markdown", intro)] + [_cell("code", src) for src in steps]
     return {
         "cells": cells,
@@ -230,6 +287,14 @@ def studio_notebook() -> dict:
                      (STUDIO_INSTALL, STUDIO_START, STUDIO_WATCH, STUDIO_STOP))
 
 
+def kaggle_notebook() -> dict:
+    notebook = _notebook("Kavra_Studyo_Kaggle.ipynb", KAGGLE_INTRO,
+                         (KAGGLE_INSTALL, KAGGLE_START, STUDIO_WATCH, KAGGLE_STOP))
+    notebook["metadata"]["kaggle"] = {"accelerator": "nvidiaTeslaT4", "isInternetEnabled": True,
+                                      "isGpuEnabled": True}
+    return notebook
+
+
 def build_bundle(target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -244,7 +309,10 @@ def main() -> None:
     (OUT / "Kavra_TTS_Sunucusu.ipynb").write_text(json.dumps(notebook(), ensure_ascii=False, indent=1), encoding="utf-8")
     (OUT / "Kavra_Studyo_Colab.ipynb").write_text(
         json.dumps(studio_notebook(), ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"Yazıldı: {bundle} ({bundle.stat().st_size // 1024} KB), Kavra_TTS_Sunucusu.ipynb ve Kavra_Studyo_Colab.ipynb")
+    (OUT / "Kavra_Studyo_Kaggle.ipynb").write_text(
+        json.dumps(kaggle_notebook(), ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"Yazıldı: {bundle} ({bundle.stat().st_size // 1024} KB), Kavra_TTS_Sunucusu.ipynb, "
+          "Kavra_Studyo_Colab.ipynb ve Kavra_Studyo_Kaggle.ipynb")
 
 
 if __name__ == "__main__":
