@@ -516,3 +516,41 @@ class ParallelStatusTextTests(unittest.TestCase):
         text = parallel_status("XTTS", 2, 45, 63, {1: 55, 2: 45})
         self.assertEqual(text, "XTTS 2× seslendiriliyor · 45/63 slayt bitti · sürüyor: 46, 56")
         self.assertEqual(parallel_status("XTTS", 2, 63, 63, {}), "XTTS 2× seslendiriliyor · 63/63 slayt bitti")
+
+
+class SingleGpuEndToEndTests(unittest.TestCase):
+    """Tek GPU'lu makinede (ör. RTX 4060 + iGPU; iGPU CUDA listesinde yoktur) gerçek
+    _worker_entry ile paralel üretim: her worker GPU0'da kalmalı, her slayt kendi
+    sesini almalı ve durum yazısı geri gitmemeli. Sahte torch + sahte sağlayıcı."""
+
+    def test_three_workers_on_one_gpu_stay_on_device_zero_with_monotonic_status(self):
+        import re
+        import sys
+        import types
+
+        devices = []
+        cuda = types.SimpleNamespace(is_available=lambda: True, device_count=lambda: 1,
+                                     set_device=devices.append)
+        from app.models import SynthResult
+
+        provider = _FakeProvider(SynthResult(duration=1.0, words=None))
+        statuses, progress = [], []
+        ctx = _FakeCtx()
+        self.addCleanup(ctx.stop.set)
+        items = [(f"metin{i}", "v", f"{i}.mp3") for i in range(9)]
+
+        with patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=cuda)}), \
+                patch("app.tts.coqui_provider.CoquiTTSProvider", return_value=provider), \
+                patch("app.tts.coqui_parallel._POLL_SECONDS", 0.03):
+            outcomes = _run_workers(_distribute(items, 3), progress_cb=lambda d, t: progress.append(d),
+                                    status_cb=statuses.append, _ctx=ctx)
+
+        self.assertEqual(devices, [0, 0, 0], "tek GPU'da her worker GPU0'ı seçmeli")
+        self.assertEqual(sorted(outcomes), list(range(9)))
+        self.assertTrue(all(ok for ok, _oom, _detail in outcomes.values()))
+        self.assertEqual(sorted(str(out) for _t, _v, out in provider.calls), sorted(f"{i}.mp3" for i in range(9)))
+        done = [int(m.group(1)) for s in statuses if (m := re.search(r"(\d+)/9 slayt bitti", s))]
+        self.assertEqual(done, sorted(done))
+        self.assertEqual(done[-1], 9)
+        self.assertEqual(progress, sorted(progress))
+        self.assertTrue(any("XTTS 3× seslendiriliyor" in s for s in statuses))
