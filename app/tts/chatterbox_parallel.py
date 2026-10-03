@@ -73,6 +73,7 @@ def _run_workers(
     retry_incomplete: bool = False,
     progress_cb=None,
     status_cb=None,
+    item_done_cb=None,
 ) -> dict[int, tuple[bool, bool, str | None]]:
     job_dir = CACHE_DIR / "chatterbox_parallel"
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -232,6 +233,8 @@ def _run_workers(
                 if ok and progress_cb:
                     successful = sum(1 for result in outcomes.values() if result[0])
                     progress_cb(successful, total)
+                if ok and item_done_cb:
+                    item_done_cb(index, None)
 
         for _number, process, _spec_path, _result_path, group in workers:
             if process.poll() is None:
@@ -260,8 +263,11 @@ def synthesize_parallel(
     status_cb=None,
     sentence_isolation: bool = False,
     retry_incomplete: bool = False,
+    item_done_cb=None,
 ) -> list[SynthResult]:
-    """Chatterbox seslerini bağımsız GPU worker'larına bölerek üretir."""
+    """Chatterbox seslerini bağımsız GPU worker'larına bölerek üretir.
+
+    item_done_cb(indeks, None): bir öğenin sesi yazılınca çağrılır (indeks ``items`` sırası)."""
     if not items:
         return []
     n_workers = min(max(n_workers, 1), MAX_PARALLEL_WORKERS, len(items))
@@ -273,6 +279,8 @@ def synthesize_parallel(
             retry_incomplete=retry_incomplete,
             progress_cb=progress_cb,
             status_cb=status_cb,
+            # Yalnız verildiğinde geçilir: eski imzalı çağrılar/yamalar etkilenmesin.
+            **({"item_done_cb": item_done_cb} if item_done_cb else {}),
         )
     else:
         outcomes = _run_workers_fn(groups, progress_cb)
@@ -293,6 +301,10 @@ def synthesize_parallel(
             if progress_cb:
                 progress_cb(successful_count + done, len(items))
 
+        def retry_item_done(retry_index: int, result) -> None:
+            if item_done_cb:
+                item_done_cb(failed_indexes[retry_index], result)
+
         synthesize_parallel(
             retry_items,
             1,
@@ -301,6 +313,7 @@ def synthesize_parallel(
             status_cb,
             sentence_isolation=sentence_isolation,
             retry_incomplete=retry_incomplete,
+            **({"item_done_cb": retry_item_done} if item_done_cb else {}),
         )
         return [SynthResult(duration=0.0, words=None) for _ in items]
     _index, _recoverable, detail = failures[0]

@@ -177,12 +177,16 @@ def _run_workers(
     retry_incomplete: bool = False,
     _ctx=None,
     _worker=None,
+    item_done_cb=None,
 ) -> dict[int, tuple[bool, bool, str | None]]:
     """Verilen grupları gerçek ayrı process'lerde çalıştırır, sonuçları toplar.
     Test edilebilirlik için synthesize_parallel'dan ayrı bir fonksiyon —
     testler bunun yerine sahte (gerçek process açmayan) bir sürüm geçirebilir; `_ctx`
     (Process/Queue/Event sağlayan bir multiprocessing benzeri) ve `_worker` ile de
     gerçek process açmadan bu orkestrasyonun kendisi test edilebilir.
+
+    item_done_cb(indeks, None): bir öğenin sesi başarıyla yazılınca çağrılır (eşzamanlı
+    video üretimi için; bkz. app/pipeline.py). Paralel yolda kelime zamanlaması yoktur.
 
     progress_cb(tamamlanan, toplam): hangi worker'dan geldiğine bakmaksızın,
     her öğe sonucu kuyruktan alındıkça çağrılır — böylece uzun bir render'da
@@ -340,6 +344,8 @@ def _run_workers(
         if ok and progress_cb:
             successful = sum(1 for result in outcomes.values() if result[0])
             progress_cb(successful, total_items)
+        if ok and item_done_cb:
+            item_done_cb(idx, None)
 
     for process in procs.values():
         process.join(timeout=5)
@@ -355,6 +361,7 @@ def synthesize_parallel(
     progress_cb=None,
     status_cb=None,
     retry_incomplete: bool = False,
+    item_done_cb=None,
 ) -> list[SynthResult]:
     """items: (text, voice, out_path). Tüm öğeler aynı sesi kullanmalı (bir
     render işi zaten tek bir ses kullanır). n_workers <= 1 ise (ya da tek
@@ -363,6 +370,9 @@ def synthesize_parallel(
     ``retry_incomplete=True`` seçilirse CUDA belleğine sığmayan grup daha az
     worker'la yeniden denenir. Varsayılan False olduğunda ve OOM DIŞI her
     hatada render açıkça durur; böylece pahalı sürpriz tekrarlar yapılmaz.
+
+    item_done_cb(indeks, sonuç_ya_da_None) verilirse her öğenin sesi diske yazılır yazılmaz
+    çağrılır; indeks ``items`` içindeki sıradır (OOM sonrası yeniden denemede de).
 
     progress_cb(tamamlanan, toplam) verilirse, her ses öğesi bitişinde
     çağrılır (hem tek process'lik düşük seviye hem de çok worker'lı yolda) —
@@ -385,6 +395,8 @@ def synthesize_parallel(
             results.append(provider.synthesize(text, voice, out_path))
             if progress_cb:
                 progress_cb(i, len(items))
+            if item_done_cb:
+                item_done_cb(i - 1, results[-1])
         return results
 
     n_workers = min(n_workers, len(items))
@@ -397,6 +409,8 @@ def synthesize_parallel(
             progress_cb,
             status_cb,
             retry_incomplete=retry_incomplete,
+            # Yalnız verildiğinde geçilir: eski imzalı çağrılar/yamalar etkilenmesin.
+            **({"item_done_cb": item_done_cb} if item_done_cb else {}),
         )
     else:
         outcomes = _run_workers_fn(groups, progress_cb)
@@ -420,6 +434,10 @@ def synthesize_parallel(
             if progress_cb:
                 progress_cb(successful_count + done, len(items))
 
+        def retry_item_done(retry_index: int, result) -> None:
+            if item_done_cb:
+                item_done_cb(failed_indexes[retry_index], result)
+
         synthesize_parallel(
             retry_items,
             retry_n,
@@ -427,6 +445,7 @@ def synthesize_parallel(
             retry_progress,
             status_cb,
             retry_incomplete=True,
+            **({"item_done_cb": retry_item_done} if item_done_cb else {}),
         )
         return [SynthResult(duration=0.0, words=None) for _ in items]
 

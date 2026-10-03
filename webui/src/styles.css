@@ -148,6 +148,8 @@ select { color-scheme: inherit; }
 .job-copy b { color: var(--accent); }
 .progress-track { height: 3px; background: var(--line-strong); border-radius: 10px; margin-top: 8px; overflow: hidden; }
 .progress-track span { display: block; height: 100%; background: var(--accent); transition: width .3s ease; }
+.job-copy-secondary { margin-top: 8px; font-size: .92em; opacity: .85; }
+.progress-track.secondary span { background: color-mix(in srgb, var(--accent) 55%, var(--line-strong)); }
 .slide-list { padding: 7px; overflow-y: auto; min-height: 0; }
 .slide-card { display: grid; grid-template-columns: 15px 29px 1fr auto; gap: 8px; align-items: center; padding: 10px 8px; border: 1px solid transparent; border-radius: 10px; cursor: pointer; transition: .16s ease; }
 .slide-card:hover { background: rgba(255,255,255,.025); }

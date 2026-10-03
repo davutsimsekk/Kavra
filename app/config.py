@@ -152,6 +152,10 @@ class VideoOptions:
     tts_backend: str = "local"
     # Uzak GPU'ya aynı anda gönderilen slayt sayısı (sunucudaki model kopyasına göre).
     remote_tts_concurrency: int = 2
+    # True: her slaytın sesi biter bitmez video parçası (görsel + ffmpeg/NVENC) üretilir;
+    # seslendirme sırasında boşta kalan CPU kullanılır (bkz. app/pipeline.py). False: eski
+    # sıralı akış — önce tüm sesler, sonra tüm parçalar. Çıktıyı değiştirmez, hash'e girmez.
+    overlap_segments: bool = False
 
 
 # Ortalama Türkçe ders anlatımı hızı — render_estimate (önizleme) ve
@@ -194,6 +198,7 @@ DEFAULT_SETTINGS = {
     "chatterbox_retry_incomplete": False,
     "tts_backend": "local",
     "remote_tts_concurrency": 2,
+    "overlap_segments": False,
     # İki sabit GPU kaynağı (bkz. app/tts/remote.py PROFILES): "pc" (Tailscale üzerinden
     # kendi bilgisayarın) ve "colab". Token'lar burada değil .env'de tutulur.
     "remote_tts_profiles": {"pc": {"url": ""}, "colab": {"url": ""}},

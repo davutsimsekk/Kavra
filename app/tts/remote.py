@@ -331,8 +331,11 @@ def synthesize_remote(
     progress_cb=None,
     status_cb=None,
     client: RemoteTTSClient | None = None,
+    item_done_cb=None,
 ) -> list[SynthResult]:
-    """(metin, ses, çıktı_yolu) listesini uzak GPU'da üretir; sonuçlar girdiyle aynı sırada."""
+    """(metin, ses, çıktı_yolu) listesini uzak GPU'da üretir; sonuçlar girdiyle aynı sırada.
+
+    item_done_cb(indeks, sonuç): her öğe indirilip diske yazılınca çağrılır."""
     client = client or RemoteTTSClient(RemoteTTSConfig.load())
     if status_cb:
         status_cb("Uzak GPU'ya bağlanılıyor…")
@@ -357,10 +360,13 @@ def synthesize_remote(
         }
         try:
             for future in as_completed(futures):
-                results[futures[future]] = future.result()
+                index = futures[future]
+                results[index] = future.result()
                 done += 1
                 if progress_cb:
                     progress_cb(done, len(items))
+                if item_done_cb:
+                    item_done_cb(index, results[index])
         except BaseException:
             client.stop.set()
             for pending in futures:

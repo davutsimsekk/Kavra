@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 # app.config, import edilir edilmez stdout/stderr'i koşulsuz UTF-8'e sabitliyor
@@ -13,8 +14,15 @@ from app.models import Slide
 from app.pipeline import render_video
 
 
+_EMIT_LOCK = threading.Lock()
+
+
 def emit(payload: dict):
-    print("__DERS_JOB__" + json.dumps(payload, ensure_ascii=False), flush=True)
+    # Eşzamanlı modda video parçası iş parçacıkları ve TTS aynı anda olay yazar; satırlar
+    # birbirine karışırsa API tarafındaki JSON ayrıştırması bozulur.
+    line = "__DERS_JOB__" + json.dumps(payload, ensure_ascii=False)
+    with _EMIT_LOCK:
+        print(line, flush=True)
 
 
 def main(spec_path: str) -> int:
@@ -30,6 +38,9 @@ def main(spec_path: str) -> int:
         def on_status(message: str):
             emit({"type": "status", "message": message, "total": len(slides)})
 
+        def on_segments(done: int, total: int):
+            emit({"type": "segments", "current": done, "total": total})
+
         on_status("Render planı hazırlanıyor")
 
         video, audio = render_video(
@@ -42,6 +53,7 @@ def main(spec_path: str) -> int:
             progress_cb=on_progress,
             status_cb=on_status,
             force_audio=bool(spec.get("forceAudioRegeneration", False)),
+            segment_progress_cb=on_segments,
         )
         api_base = spec.get("apiBase") or f"/api/projects/{pdir.name}"
         emit({

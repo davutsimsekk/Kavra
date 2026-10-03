@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -279,9 +280,132 @@ def _build_bullet_reveal_stages(slide: Slide, index: int, total: int, breadcrumb
     return stages
 
 
+
+class _OverlappedSegments:
+    """Eşzamanlı mod: bir slaytın sesi diske yazılır yazılmaz o slaytın video parçasını
+    (görsel + ffmpeg/NVENC, yani render_one'ın tamamı) arka planda üretir.
+
+    Kurallar:
+    - İlk ses bitmeden hiçbir parça başlamaz. İlk sesin bitmesi modellerin yüklendiği
+      anlamına gelir; model yüklemesi CPU'yu zaten yoğun kullandığı için bu bilinçlidir.
+      Sesi önbellekten gelen (yalnız görseli değişen) slaytlar da bu ana kadar bekler.
+    - Seslendirme bitince bildirim gelmemiş kalan slaytlar da kuyruğa eklenir; böylece
+      bildirim vermeyen bir TTS yolu bile eksik parça bırakmaz.
+    - Bir parça hata verirse yeni parça başlatılmaz; hata seslendirme bitince fırlatılır.
+      Seslendirme hata verirse kuyruktaki parçalar iptal edilir, çalışanlar beklenir.
+    - Hash dosyası render_one içinde yalnız parça tamamlanınca yazılır; yarıda kalan bir
+      render'da biten parçalar bir sonraki render'da önbellekten gelir.
+    """
+
+    def __init__(self, plan: list[dict], pending: list, render_one, max_workers: int,
+                 segment_progress_cb=None, status_cb=None):
+        self._plan = plan
+        self._pending = pending
+        self._render_one = render_one
+        self._targets = [entry for entry in plan if not entry["fully_cached"]]
+        self._pool = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(self._targets) or 1)),
+                                        thread_name_prefix="pass3-overlap")
+        # RLock: çok hızlı biten bir parçanın tamamlanma geri çağrısı, add_done_callback
+        # sırasında kilidi tutan aynı iş parçacığında hemen çalışabilir.
+        self._lock = threading.RLock()
+        self._futures: dict = {}
+        self._submitted: set[int] = set()
+        self._started = False
+        self._closed = False
+        self._failed = False
+        self._done = 0
+        self._segment_progress_cb = segment_progress_cb
+        self._status_cb = status_cb
+        self._report()
+
+    @property
+    def total(self) -> int:
+        return len(self._targets)
+
+    def _report(self) -> None:
+        if self._segment_progress_cb:
+            self._segment_progress_cb(self._done, self.total)
+
+    def _submit_locked(self, entry: dict) -> None:
+        if self._closed or self._failed or entry["index"] in self._submitted:
+            return
+        self._submitted.add(entry["index"])
+        future = self._pool.submit(self._render_one, entry)
+        self._futures[future] = entry
+        future.add_done_callback(self._on_segment_done)
+
+    def _on_segment_done(self, future) -> None:
+        if future.cancelled():
+            return
+        with self._lock:
+            if future.exception() is not None:
+                self._failed = True
+                return
+            self._done += 1
+            self._report()
+
+    def _start_locked(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        for entry in self._targets:
+            if entry["audio_reused"]:
+                self._submit_locked(entry)
+
+    def item_done(self, pending_position: int, result: SynthResult | None) -> None:
+        """TTS'ten gelen "bu öğenin sesi hazır" bildirimi (indeks ``pending`` sırasıdır)."""
+        entry = self._plan[self._pending[pending_position][0]]
+        with self._lock:
+            if entry["index"] in self._submitted:
+                return
+            # Paralel TTS yolları kelime zamanlaması döndürmez; sıralı akış da bu durumda
+            # aynı boş sonucu kullanır, yani altyazı iki modda da aynı üretilir.
+            entry["synth"] = result if result is not None else SynthResult(duration=0.0, words=None)
+            self._start_locked()
+            self._submit_locked(entry)
+
+    def tts_finished(self, results: list[SynthResult]) -> None:
+        with self._lock:
+            for (plan_index, *_rest), synth in zip(self._pending, results):
+                entry = self._plan[plan_index]
+                if entry["index"] not in self._submitted:
+                    entry["synth"] = synth
+            self._start_locked()
+            for entry in self._targets:
+                self._submit_locked(entry)
+            remaining = self.total - self._done
+        if self._status_cb and remaining:
+            self._status_cb(f"Seslendirme bitti · kalan {remaining} video parçası tamamlanıyor")
+
+    def abort(self) -> None:
+        with self._lock:
+            self._closed = True
+            for future in self._futures:
+                future.cancel()
+        self._pool.shutdown(wait=True, cancel_futures=True)
+
+    def wait(self) -> None:
+        try:
+            with self._lock:
+                futures = list(self._futures)
+            for future in as_completed(futures):
+                future.result()  # ilk hatalı parça render'ı durdurur
+            with self._lock:
+                missing = [entry["index"] for entry in self._targets if entry["index"] not in self._submitted]
+            if missing:
+                raise RuntimeError(f"Video parçası üretilmedi: slayt {missing[0]}")
+        except BaseException:
+            self.abort()
+            raise
+        finally:
+            self._pool.shutdown(wait=True, cancel_futures=True)
+
+
 def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice: str,
                   rate: str, opts: VideoOptions, progress_cb=None, status_cb=None,
-                  force_audio: bool = False) -> tuple[Path, Path]:
+                  force_audio: bool = False, segment_progress_cb=None) -> tuple[Path, Path]:
+    """segment_progress_cb(biten, toplam): yalnız eşzamanlı modda (opts.overlap_segments)
+    video parçalarının ilerlemesini ayrı bir sayaçla bildirir."""
     assets = pdir / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     quarantined = quarantine_orphan_assets(pdir, len(slides))
@@ -394,75 +518,6 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
             pending.append((len(plan), narration_for_tts, voice, entry["audio_path"]))
         plan.append(entry)
 
-    # 2. geçiş: bekleyen sesleri üret. Coqui + birden fazla paralel worker
-    # seçiliyse (bkz. VideoOptions.coqui_parallel_workers), bağımsız
-    # process'lerde aynı anda üretilir — diğer sağlayıcılar ve tekli Coqui
-    # kullanımı etkilenmez, eskisi gibi tek tek üretir.
-    if pending:
-        items = [(text, v, out_path) for _idx, text, v, out_path in pending]
-        total_pending = len(items)
-
-        def on_tts_progress(done: int, done_total: int) -> None:
-            # Bu geçişin kendi (0..total_pending) sayacı var, 3. geçişin
-            # (0..total) sayacından FARKLI — kasıtlı: kullanıcı arayüzü bu
-            # geçişte "Seslendiriliyor" mesajını görüp ilerlemenin gerçekten
-            # ilerlediğini anlar; 3. geçiş başlayınca sayaç kendi ölçeğine
-            # döner. Hiç ilerleme göstermemekten (eski davranış — büyük
-            # projelerde "0/0 Başlatılıyor" olarak saatlerce donmuş görünüyordu)
-            # çok daha iyi.
-            if progress_cb:
-                progress_cb(done, done_total, "Seslendiriliyor")
-
-        def on_tts_status(message: str) -> None:
-            if status_cb:
-                status_cb(message)
-
-        if remote_tts:
-            results = synthesize_remote(
-                items,
-                tts_provider_name,
-                rate,
-                opts.remote_tts_concurrency,
-                progress_cb=on_tts_progress,
-                status_cb=on_tts_status,
-            )
-        elif coqui_parallel:
-            results = synthesize_parallel(
-                items,
-                opts.coqui_parallel_workers,
-                progress_cb=on_tts_progress,
-                status_cb=on_tts_status,
-                retry_incomplete=opts.coqui_retry_incomplete,
-            )
-        elif chatterbox_parallel:
-            results = synthesize_chatterbox_parallel(
-                items,
-                opts.chatterbox_parallel_workers,
-                progress_cb=on_tts_progress,
-                status_cb=on_tts_status,
-                sentence_isolation=opts.chatterbox_sentence_isolation,
-                retry_incomplete=opts.chatterbox_retry_incomplete,
-            )
-        else:
-            results = []
-            for i, (text, v, out_path) in enumerate(items, start=1):
-                results.append(provider.synthesize(text, v, out_path, rate))
-                on_tts_progress(i, total_pending)
-        for (plan_index, *_rest), synth in zip(pending, results):
-            plan[plan_index]["synth"] = synth
-
-    # 3. geçiş: her slayt için görsel/segment üretimi. Slaytlar birbirinden bağımsız
-    # (her biri kendi img_path/seg_path'ine yazar, paylaşılan durum yok — render_slide
-    # her çağrıda kendi font nesnelerini oluşturur, ffmpeg zaten ayrı bir süreç), bu yüzden
-    # yeni üretilecek slaytlar PASS3_MAX_WORKERS kadar iş parçacığında paralel işlenir.
-    # Önbellekten gelenler (fully_cached) anında tamamlandığından sıralı bırakıldı.
-    pending = [entry for entry in plan if not entry["fully_cached"]]
-    done = 0
-    if progress_cb:
-        for entry in plan:
-            if entry["fully_cached"]:
-                progress_cb(entry["index"], total, entry["slide"].title)
-
     def render_one(entry: dict) -> None:
         i = entry["index"]
         slide = entry["slide"]
@@ -526,24 +581,119 @@ def render_video(pdir: Path, slides: list[Slide], tts_provider_name: str, voice:
 
         entry["hash_file"].write_text(entry["hash"], encoding="utf-8")
 
+    # Eşzamanlı mod (opts.overlap_segments): her slaytın sesi biter bitmez video parçası
+    # üretilir. Kapalıyken (varsayılan) aşağıdaki 3. geçiş eskisi gibi sıralı çalışır.
+    overlap = None
+    if opts.overlap_segments and pending:
+        overlap = _OverlappedSegments(
+            plan, pending, render_one, PASS3_MAX_WORKERS,
+            segment_progress_cb=segment_progress_cb, status_cb=status_cb,
+        )
+    tts_extra = {"item_done_cb": overlap.item_done} if overlap is not None else {}
+
+    # 2. geçiş: bekleyen sesleri üret. Coqui + birden fazla paralel worker
+    # seçiliyse (bkz. VideoOptions.coqui_parallel_workers), bağımsız
+    # process'lerde aynı anda üretilir — diğer sağlayıcılar ve tekli Coqui
+    # kullanımı etkilenmez, eskisi gibi tek tek üretir.
     if pending:
-        workers = min(PASS3_MAX_WORKERS, len(pending))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pass3") as pool:
-            futures = {pool.submit(render_one, entry): entry for entry in pending}
-            try:
-                for future in as_completed(futures):
-                    future.result()  # bir slayt başarısız olursa hemen fırlat, render'ı durdur
-                    done += 1
-                    if progress_cb:
-                        entry = futures[future]
-                        progress_cb(done, total, entry["slide"].title)
-            except BaseException:
-                # Bir görev hata verince ya da render iptal edilince bekleyen diğer görevleri
-                # başlatma; halihazırda çalışanların (ffmpeg alt süreçleri) bitmesi beklenir,
-                # süreç ağacının tamamen kapatılması API tarafındaki iptal mekanizmasının işi.
-                for pending_future in futures:
-                    pending_future.cancel()
-                raise
+        items = [(text, v, out_path) for _idx, text, v, out_path in pending]
+        total_pending = len(items)
+
+        def on_tts_progress(done: int, done_total: int) -> None:
+            # Bu geçişin kendi (0..total_pending) sayacı var, 3. geçişin
+            # (0..total) sayacından FARKLI — kasıtlı: kullanıcı arayüzü bu
+            # geçişte "Seslendiriliyor" mesajını görüp ilerlemenin gerçekten
+            # ilerlediğini anlar; 3. geçiş başlayınca sayaç kendi ölçeğine
+            # döner. Hiç ilerleme göstermemekten (eski davranış — büyük
+            # projelerde "0/0 Başlatılıyor" olarak saatlerce donmuş görünüyordu)
+            # çok daha iyi.
+            if progress_cb:
+                progress_cb(done, done_total, "Seslendiriliyor")
+
+        def on_tts_status(message: str) -> None:
+            if status_cb:
+                status_cb(message)
+
+        try:
+            if remote_tts:
+                results = synthesize_remote(
+                    items,
+                    tts_provider_name,
+                    rate,
+                    opts.remote_tts_concurrency,
+                    progress_cb=on_tts_progress,
+                    status_cb=on_tts_status,
+                    **tts_extra,
+                )
+            elif coqui_parallel:
+                results = synthesize_parallel(
+                    items,
+                    opts.coqui_parallel_workers,
+                    progress_cb=on_tts_progress,
+                    status_cb=on_tts_status,
+                    retry_incomplete=opts.coqui_retry_incomplete,
+                    **tts_extra,
+                )
+            elif chatterbox_parallel:
+                results = synthesize_chatterbox_parallel(
+                    items,
+                    opts.chatterbox_parallel_workers,
+                    progress_cb=on_tts_progress,
+                    status_cb=on_tts_status,
+                    sentence_isolation=opts.chatterbox_sentence_isolation,
+                    retry_incomplete=opts.chatterbox_retry_incomplete,
+                    **tts_extra,
+                )
+            else:
+                results = []
+                for i, (text, v, out_path) in enumerate(items, start=1):
+                    results.append(provider.synthesize(text, v, out_path, rate))
+                    on_tts_progress(i, total_pending)
+                    if overlap is not None:
+                        overlap.item_done(i - 1, results[-1])
+        except BaseException:
+            if overlap is not None:
+                overlap.abort()
+            raise
+        if overlap is not None:
+            overlap.tts_finished(results)
+        else:
+            for (plan_index, *_rest), synth in zip(pending, results):
+                plan[plan_index]["synth"] = synth
+
+    if overlap is not None:
+        overlap.wait()
+    else:
+        # 3. geçiş: her slayt için görsel/segment üretimi. Slaytlar birbirinden bağımsız
+        # (her biri kendi img_path/seg_path'ine yazar, paylaşılan durum yok — render_slide
+        # her çağrıda kendi font nesnelerini oluşturur, ffmpeg zaten ayrı bir süreç), bu yüzden
+        # yeni üretilecek slaytlar PASS3_MAX_WORKERS kadar iş parçacığında paralel işlenir.
+        # Önbellekten gelenler (fully_cached) anında tamamlandığından sıralı bırakıldı.
+        pending = [entry for entry in plan if not entry["fully_cached"]]
+        done = 0
+        if progress_cb:
+            for entry in plan:
+                if entry["fully_cached"]:
+                    progress_cb(entry["index"], total, entry["slide"].title)
+
+        if pending:
+            workers = min(PASS3_MAX_WORKERS, len(pending))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pass3") as pool:
+                futures = {pool.submit(render_one, entry): entry for entry in pending}
+                try:
+                    for future in as_completed(futures):
+                        future.result()  # bir slayt başarısız olursa hemen fırlat, render'ı durdur
+                        done += 1
+                        if progress_cb:
+                            entry = futures[future]
+                            progress_cb(done, total, entry["slide"].title)
+                except BaseException:
+                    # Bir görev hata verince ya da render iptal edilince bekleyen diğer görevleri
+                    # başlatma; halihazırda çalışanların (ffmpeg alt süreçleri) bitmesi beklenir,
+                    # süreç ağacının tamamen kapatılması API tarafındaki iptal mekanizmasının işi.
+                    for pending_future in futures:
+                        pending_future.cancel()
+                    raise
 
     # segment_paths/audio_paths, paralel tamamlanma sırasından bağımsız olarak DAİMA slayt
     # index sırasında olmalı — concat_videos/concat_audio bu listeyi olduğu gibi birleştirir.

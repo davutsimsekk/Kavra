@@ -146,6 +146,17 @@ function ProgressStrip({ job }) {
         <b>{job.progress || 0}%</b>
       </div>
       <div className="progress-track"><span style={{ width: `${job.progress || 0}%` }} /></div>
+      {job.segmentsTotal > 0 && (
+        // Yalnız eşzamanlı modda: seslendirmeyle birlikte üretilen video parçaları.
+        <>
+          <div className="job-copy job-copy-secondary">
+            <span />
+            <span>Video parçaları</span>
+            <b>{job.segmentsDone || 0}/{job.segmentsTotal}</b>
+          </div>
+          <div className="progress-track secondary"><span style={{ width: `${Math.round((job.segmentsDone || 0) * 100 / job.segmentsTotal)}%` }} /></div>
+        </>
+      )}
     </div>
   )
 }
@@ -262,6 +273,7 @@ export default function App() {
     qualityPreset: 'high',
     coquiParallelWorkers: 1,
     coquiRetryIncomplete: false,
+    overlapSegments: false,
     chatterboxParallelWorkers: 1,
     chatterboxSentenceIsolation: false,
     chatterboxRetryIncomplete: false,
@@ -299,6 +311,7 @@ export default function App() {
           qualityPreset: s.video_quality_preset || 'high',
           coquiParallelWorkers: s.coqui_parallel_workers || 1,
           coquiRetryIncomplete: s.coqui_retry_incomplete || false,
+          overlapSegments: s.overlap_segments || false,
           chatterboxParallelWorkers: s.chatterbox_parallel_workers || 1,
           chatterboxSentenceIsolation: s.chatterbox_sentence_isolation || false,
           chatterboxRetryIncomplete: s.chatterbox_retry_incomplete || false,
@@ -1704,6 +1717,14 @@ export default function App() {
           <small className={renderEstimate.providerIsLocal ? 'health-hint' : 'health-missing'}>{renderEstimate.providerCostNote}</small>
         </div>}
         {qualityBlocked && <div className="render-gate"><TriangleAlert size={16} /><span>Ücretli veya ağır ses üretimi başlamadan önce kritik anlatı sorunlarını düzelt.</span></div>}
+        <Toggle
+          checked={video.overlapSegments}
+          onChange={(value) => setVideo({ ...video, overlapSegments: value })}
+          label="Seslendirirken video parçalarını da üret"
+          hint={video.overlapSegments
+            ? 'Her slaytın sesi biter bitmez videosu (NVENC dahil) üretilir; modeller yüklenip ilk ses bitmeden başlamaz. İki ilerleme çubuğu görürsün.'
+            : 'Sıralı mod: önce tüm sesler, sonra tüm video parçaları üretilir.'}
+        />
         <div className="render-actions">
           <button className="button primary render-button" onClick={() => render(false)} disabled={!project?.slides.length || Boolean(activeJob) || qualityBlocked}><Clapperboard size={17} /> {activeJob?.type === 'video' ? 'Render sürüyor…' : project?.outputs?.video ? 'Videoyu güncelle' : 'Videoyu oluştur'}</button>
           {activeJob?.type === 'video' && <button type="button" className="button danger" onClick={cancelRender} disabled={jobState?.status === 'cancelling'}><X size={16} /> {jobState?.status === 'cancelling' ? 'İptal ediliyor…' : 'Renderı iptal et'}</button>}
