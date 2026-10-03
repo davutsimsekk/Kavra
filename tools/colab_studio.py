@@ -179,9 +179,40 @@ def data_dir(use_drive: bool) -> Path:
     return DRIVE_DATA_DIR
 
 
+# Bir XTTS kopyası yerelde ~2.1 GB VRAM ölçüldü; çıkarım tepesi ve CUDA bağlamı için
+# pay bırakılır. Her kopya ayrı bir süreç olduğundan sistem RAM'i de sınırlar.
+XTTS_VRAM_GIB = 3.5
+XTTS_RAM_GIB = 4.0
+
+
+def gpu_memories_mib() -> list[int]:
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=20).stdout
+        return [int(line.strip()) for line in out.splitlines() if line.strip().isdigit()]
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def ram_gib() -> float:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+    except (ValueError, OSError, AttributeError):
+        return 0.0
+
+
+def xtts_max_workers(gpus_mib: list[int], ram: float) -> int:
+    """Donanıma sığan en fazla XTTS kopyası: her GPU'ya VRAM'i kadar, toplamda RAM kadar."""
+    by_vram = sum(int(mib / 1024 // XTTS_VRAM_GIB) for mib in gpus_mib)
+    by_ram = int(ram // XTTS_RAM_GIB) if ram else by_vram
+    return max(1, min(by_vram, by_ram))
+
+
 def server_env(host: str, token: str, data: Path, root: Path = ROOT,
-               base: dict[str, str] | None = None) -> dict[str, str]:
+               base: dict[str, str] | None = None, coqui_max_workers: int | None = None) -> dict[str, str]:
     env = dict(os.environ if base is None else base)
+    if coqui_max_workers:
+        env["KAVRA_COQUI_MAX_WORKERS"] = str(coqui_max_workers)
     env.update({
         "KAVRA_ALLOWED_HOSTS": host,
         "KAVRA_ACCESS_TOKEN": token,
@@ -225,6 +256,7 @@ class Studio:
     data: Path
     root: Path = ROOT
     url: str = ""
+    coqui_max_workers: int | None = None
     server: subprocess.Popen | None = None
     tunnel: subprocess.Popen | None = None
     _log: object = field(default=None, repr=False)
@@ -241,7 +273,8 @@ class Studio:
         self._log = open(LOG_PATH, "a", encoding="utf-8")
         self.server = subprocess.Popen(
             [VENV_PY, "-m", "uvicorn", "studio_web.api:app", "--host", "127.0.0.1", "--port", str(PORT)],
-            cwd=self.root, env=server_env(urlsplit(self.url).hostname or "", self.token, self.data, self.root),
+            cwd=self.root, env=server_env(urlsplit(self.url).hostname or "", self.token, self.data, self.root,
+                                          coqui_max_workers=self.coqui_max_workers),
             stdout=self._log, stderr=subprocess.STDOUT)
         wait_until_ready(self.server, self.token)
 
@@ -265,6 +298,8 @@ class Studio:
         print("  ", self.link)
         print("Adres:", self.url, "| Şifre:", self.token)
         print("Veriler:", self.data)
+        if self.coqui_max_workers:
+            print(f"XTTS paralel model sınırı: {self.coqui_max_workers} (Ses ayarları > Paralel model sayısı)")
         print("=" * 70, flush=True)
 
     def watch(self, interval: int = 60) -> None:
@@ -292,11 +327,14 @@ class Studio:
         print("Kavra ve tünel kapatıldı.")
 
 
-def start(use_drive: bool = False, token: str | None = None) -> Studio:
+def start(use_drive: bool = False, token: str | None = None, xtts_max: int | None = None) -> Studio:
+    """xtts_max: Kaggle'da 0/None = donanıma göre otomatik; Colab'da verilmezse uygulamanın varsayılanı (3)."""
     token = token or colab_secret("KAVRA_ERISIM_SIFRESI") or secrets.token_urlsafe(18)
     if len(token) < 16:
         raise ValueError("KAVRA_ERISIM_SIFRESI en az 16 karakter olmalı.")
-    studio = Studio(token=token, data=data_dir(use_drive))
+    if not xtts_max and KAGGLE:
+        xtts_max = xtts_max_workers(gpu_memories_mib(), ram_gib())
+    studio = Studio(token=token, data=data_dir(use_drive), coqui_max_workers=xtts_max or None)
     studio.start_tunnel()
     studio.start_server()
     studio.show()

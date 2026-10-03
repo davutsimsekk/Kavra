@@ -106,6 +106,17 @@ class ColabStudioTests(unittest.TestCase):
         self.assertNotIn("HF_HOME", env)  # Kavra kendi önbellek düzenini kursun
         self.assertEqual(env["PATH"], "/bin")
 
+    def test_xtts_limit_follows_gpu_memory_and_ram(self):
+        from tools import colab_studio
+
+        self.assertEqual(colab_studio.xtts_max_workers([15360, 15360], 31.4), 7)  # Kaggle 2x T4: RAM sınırlar
+        self.assertEqual(colab_studio.xtts_max_workers([15360, 15360], 64), 8)  # yalnız VRAM sınırlar
+        self.assertEqual(colab_studio.xtts_max_workers([15360], 12.7), 3)  # Colab T4
+        self.assertEqual(colab_studio.xtts_max_workers([], 0), 1)
+        env = colab_studio.server_env("h.trycloudflare.com", "x" * 24, Path("/d"), base={}, coqui_max_workers=7)
+        self.assertEqual(env["KAVRA_COQUI_MAX_WORKERS"], "7")
+        self.assertNotIn("KAVRA_COQUI_MAX_WORKERS", colab_studio.server_env("h", "x" * 24, Path("/d"), base={}))
+
     def test_apt_packages_are_checked_one_by_one(self):
         """Colab'da ffmpeg hazır gelir ama fontlar gelmez; ffmpeg varlığı font kurulumunu atlatmamalı."""
         from tools import colab_studio

@@ -23,6 +23,7 @@ Bu yüzden:
 
 from __future__ import annotations
 
+import os
 import queue
 from pathlib import Path
 
@@ -30,8 +31,37 @@ from app.models import SynthResult
 
 # Bu depoda 3 process (~6.3GB VRAM) güvenle çalıştı, 4 process (~8GB+) sistemi
 # çökertti (BSOD). Makineden makineye VRAM farklı olacağından bu ihtiyatlı bir
-# tavan — kullanıcı arayüzü de bu değerin üzerini seçtirmez.
-MAX_PARALLEL_WORKERS = 3
+# tavan — kullanıcı arayüzü de bu değerin üzerini seçtirmez. Bellek miktarı bilinen
+# bulut GPU'larında (Kaggle 2x T4 gibi) KAVRA_COQUI_MAX_WORKERS ile yükseltilebilir;
+# tools/colab_studio.py bunu donanıma göre hesaplayıp verir.
+DEFAULT_MAX_PARALLEL_WORKERS = 3
+HARD_MAX_PARALLEL_WORKERS = 16
+
+
+def _max_workers_from_env(env: dict[str, str] | None = None) -> int:
+    raw = ((os.environ if env is None else env).get("KAVRA_COQUI_MAX_WORKERS") or "").strip()
+    if raw.isdigit() and int(raw) >= 1:
+        return min(int(raw), HARD_MAX_PARALLEL_WORKERS)
+    return DEFAULT_MAX_PARALLEL_WORKERS
+
+
+MAX_PARALLEL_WORKERS = _max_workers_from_env()
+
+
+def _select_cuda_device(worker_index: int) -> int | None:
+    """Birden çok GPU varsa worker'ları kartlara sırayla dağıtır (1→GPU0, 2→GPU1, 3→GPU0...).
+
+    Coqui modeli ``.to("cuda")`` ile o anki varsayılan karta taşıdığından, model
+    yüklenmeden önce ``set_device`` çağırmak yeterlidir."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    device = (worker_index - 1) % max(torch.cuda.device_count(), 1)
+    torch.cuda.set_device(device)
+    return device
 
 
 # Ana döngünün olay beklerken uyanma aralığı (saniye) — testler küçültür.
@@ -96,6 +126,7 @@ def _worker_entry(
 
     result_queue.put(("status", "loading", worker_index, None))
     try:
+        _select_cuda_device(worker_index)
         provider = CoquiTTSProvider(gpu=True, retry_incomplete=retry_incomplete)
     except Exception as exc:
         result_queue.put(("status", "load_failed", worker_index, f"{type(exc).__name__}: {exc}"))

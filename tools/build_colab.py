@@ -216,6 +216,8 @@ ve cloudflared ile internete açar.
 - `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` — anlatı/seslendirme anahtarları (arayüzden de girilebilir).
 
 > Ses ayarlarında *Çalıştırma yeri* **Bu bilgisayar** kalmalı: burada "bu bilgisayar" Kaggle'ın GPU'su.
+> 2x T4'ün ikisini de kullanmak için Ses ayarları > **Paralel model sayısı**'nı 2 veya üstü seç: XTTS kopyaları
+> iki karta sırayla dağıtılır (1. kopya GPU0, 2. kopya GPU1, 3. kopya GPU0...).
 > Projeler `/kaggle/working/kavra_data` altında durur; oturum kapanınca silinir — videonu kapatmadan önce indir.'''
 
 KAGGLE_INSTALL = f'''# 1) Depoyu GitHub'dan çek ve kur
@@ -256,7 +258,11 @@ assert colab_studio.KAGGLE, "Bu not defteri Kaggle içindir; Colab'da Kavra_Stud
 colab_studio.install(chatterbox=CHATTERBOX_KUR)'''
 
 KAGGLE_START = '''# 2) Kavra'yı başlat ve internete aç
-studio = colab_studio.start()'''
+# XTTS'in aynı anda yükleyebileceği en fazla model kopyası. 0 = GPU belleği ve RAM'e göre otomatik
+# (2x T4'te ~7). Kopyalar GPU'lara sırayla dağıtılır; sayıyı Ses ayarları > Paralel model sayısı'ndan seçersin.
+XTTS_MAX_KOPYA = 0
+
+studio = colab_studio.start(xtts_max=XTTS_MAX_KOPYA)'''
 
 KAGGLE_STOP = '''# 4) Bitti mi? Önce 3. hücreyi ■ ile durdur, sonra bunu çalıştır; ardından sağ üstten Stop session.
 # İndirmediğin videolar oturum kapanınca silinir!

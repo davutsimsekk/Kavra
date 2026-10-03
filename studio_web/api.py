@@ -277,6 +277,7 @@ def bootstrap():
         "remoteTts": remote_tts_state(),
         # Klasör açma yalnızca Windows masaüstünde çalışır (sunucu/Docker'da düğme gizlenir).
         "canOpenFolder": os.name == "nt",
+        "coquiMaxParallelWorkers": MAX_COQUI_PARALLEL_WORKERS,
         "themes": [{"id": key, "label": value} for key, value in THEME_LABELS.items()],
         "ttsProviders": [{"id": key, "label": value} for key, value in PROVIDER_LABELS.items()],
         "models": {

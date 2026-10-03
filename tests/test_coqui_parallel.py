@@ -456,3 +456,41 @@ class RunWorkersOrchestrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiGpuAndLimitTests(unittest.TestCase):
+    def test_max_workers_defaults_to_three_and_can_be_raised_for_cloud_gpus(self):
+        from app.tts import coqui_parallel as cp
+
+        self.assertEqual(cp._max_workers_from_env({}), 3)
+        self.assertEqual(cp._max_workers_from_env({"KAVRA_COQUI_MAX_WORKERS": "7"}), 7)
+        self.assertEqual(cp._max_workers_from_env({"KAVRA_COQUI_MAX_WORKERS": "999"}), cp.HARD_MAX_PARALLEL_WORKERS)
+        for bad in ("0", "-2", "abc", " "):
+            with self.subTest(bad=bad):
+                self.assertEqual(cp._max_workers_from_env({"KAVRA_COQUI_MAX_WORKERS": bad}), 3)
+
+    def test_workers_are_spread_round_robin_across_gpus(self):
+        import sys
+        import types
+
+        from app.tts import coqui_parallel as cp
+
+        chosen = []
+        cuda = types.SimpleNamespace(is_available=lambda: True, device_count=lambda: 2, set_device=chosen.append)
+        with patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=cuda)}):
+            devices = [cp._select_cuda_device(worker) for worker in (1, 2, 3, 4, 5)]
+        self.assertEqual(devices, [0, 1, 0, 1, 0])
+        self.assertEqual(chosen, [0, 1, 0, 1, 0])
+
+    def test_single_gpu_keeps_every_worker_on_device_zero(self):
+        import sys
+        import types
+
+        from app.tts import coqui_parallel as cp
+
+        cuda = types.SimpleNamespace(is_available=lambda: True, device_count=lambda: 1, set_device=lambda _d: None)
+        with patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=cuda)}):
+            self.assertEqual([cp._select_cuda_device(w) for w in (1, 2, 3)], [0, 0, 0])
+        cpu = types.SimpleNamespace(is_available=lambda: False)
+        with patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=cpu)}):
+            self.assertIsNone(cp._select_cuda_device(1))

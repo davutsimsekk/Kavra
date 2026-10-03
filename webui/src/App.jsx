@@ -1639,6 +1639,9 @@ export default function App() {
                 <option value={1}>Kapalı — tek tek üret (en stabil)</option>
                 <option value={2}>2 paralel model (~4GB VRAM gerekir, ölçülen ~1.85x hız)</option>
                 <option value={3}>3 paralel model (~6GB VRAM gerekir, ölçülen ~2.7x hız)</option>
+                {Array.from({ length: Math.max((bootstrap.coquiMaxParallelWorkers || 3) - 3, 0) }, (_, i) => i + 4).map((count) => (
+                  <option key={count} value={count}>{count} paralel model (~{count * 2}GB VRAM toplam, GPU'lara dağıtılır)</option>
+                ))}
               </select>
               <small>
                 Her worker kendi model kopyasını belleğe yükler. VRAM'i az olan bir bilgisayarda
