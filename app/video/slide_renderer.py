@@ -1,9 +1,10 @@
 import io
 import os
 import re
+from dataclasses import replace
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
 from pygments import highlight
 from pygments.formatters import ImageFormatter
 from pygments.lexers import CppLexer
@@ -578,7 +579,7 @@ def _draw_content_layout(draw: ImageDraw.ImageDraw, slide: Slide, x1: int, x2: i
 
 def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
                 index: int, total: int, breadcrumb: str, theme: ThemePreset,
-                has_ai_background: bool = False):
+                has_ai_background: bool = False, ai_full: bool = False):
     width, height = img.size
     small_font = _font(FONT_SMALL, 25)
     title_font = _font(FONT_TITLE, 58 if len(slide.title) < 70 else 50)
@@ -606,12 +607,15 @@ def _draw_topic(img: Image.Image, draw: ImageDraw.ImageDraw, slide: Slide,
 
     content_top = max(250, title_y + 28)
     content_bottom = height - 82
-    _rounded_panel(
-        draw, (76, content_top, width - 76, content_bottom),
-        (*theme.surface, 204) if has_ai_background else theme.surface,
-        (*theme.border, 235) if has_ai_background else theme.border,
-        radius=34,
-    )
+    # Tam AI arka planda büyük içerik paneli HİÇ çizilmez: tuvalin tamamı yapay zeka görselidir,
+    # yalnızca metin ve kartlar (bkz. _GlassDraw) üstüne biner.
+    if not ai_full:
+        _rounded_panel(
+            draw, (76, content_top, width - 76, content_bottom),
+            (*theme.surface, 204) if has_ai_background else theme.surface,
+            (*theme.border, 235) if has_ai_background else theme.border,
+            radius=34,
+        )
 
     if slide.code:
         if slide.layout == "code_output" and slide.bullets:
@@ -783,6 +787,195 @@ def _render_ai_background(image_path: str, width: int, height: int,
     return Image.alpha_composite(picture, Image.new("RGBA", picture.size, veil)).convert("RGB")
 
 
+# ---------------------------------------------------------------------------
+# "Tam AI arka plan" (Slide.ai_background_full): tüm slayt tuvali yapay zeka görseli,
+# büyük beyaz içerik paneli YOK. Yalnızca metin ve küçük kartlar görselin ÜSTÜNE biner.
+# Okunabilirlik üç katmanla güvenceye alınır (hepsi görselin kendisine göre otomatik):
+#   1) görselin metin bölgesi hafifçe yumuşatılıp açık/koyuya doğru kaydırılır (kenar/köşe
+#      sanatı canlı kalsın diye yalnızca YUMUŞAK KENARLI bir bölgede),
+#   2) yazı rengi görselin parlaklığına göre açık/koyu seçilir,
+#   3) her yazının arkasına zıt renkte yumuşak bir hale, her karta buzlu cam (arka plan
+#      bulanıklaştırılıp yarı saydam renkle karıştırılır) uygulanır.
+# ---------------------------------------------------------------------------
+
+_FULL_LIGHT_TARGET = 178   # açık sanatta metin bölgesinin hedef ortalama parlaklığı (0-255)
+_FULL_DARK_TARGET = 62     # koyu sanatta
+_FULL_MAX_TONE_SHIFT = 0.62
+_GLASS_MIN_SIDE = 30       # bundan küçük dikdörtgenler (ilerleme çubuğu, vurgu şeridi) cam OLMAZ
+_GLASS_ALPHA = 0.60
+
+
+def _content_feather_mask(size: tuple[int, int], strength: float) -> Image.Image:
+    """Metin alanını (başlık altı → alt kenar) kaplayan, kenarları yumuşak bir maske."""
+    width, height = size
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (int(width * 0.035), int(height * 0.03), width - int(width * 0.035), height - int(height * 0.045)),
+        radius=int(height * 0.07), fill=round(255 * strength),
+    )
+    return mask.filter(ImageFilter.GaussianBlur(radius=max(width / 32, 12)))
+
+
+def _render_ai_full_background(image_path: str, width: int, height: int) -> tuple[Image.Image, bool]:
+    """Görseli tam ekran kapla ve metnin bineceği bölgeyi okunabilir kıl.
+
+    Dönüş: (görsel, dark_art). dark_art=True ise sanat koyudur ve AÇIK renkli yazı kullanılmalı.
+    Görselin KENARLARI/KÖŞELERİ dokunulmadan kalır — sanatın görünür olması istenen şey."""
+    with Image.open(image_path) as source:
+        picture = ImageOps.exif_transpose(source).convert("RGB")
+    picture = ImageOps.fit(
+        picture, (width, height), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
+    )
+
+    region = picture.crop((
+        int(width * 0.055), int(height * 0.08), width - int(width * 0.055), int(height * 0.924),
+    )).convert("L")
+    mean = ImageStat.Stat(region).mean[0]
+    need_light = max(0.0, (_FULL_LIGHT_TARGET - mean) / max(255 - mean, 1))
+    need_dark = max(0.0, (mean - _FULL_DARK_TARGET) / max(mean, 1))
+    dark_art = need_dark < need_light
+    amount = min(need_dark if dark_art else need_light, _FULL_MAX_TONE_SHIFT)
+
+    # İnce detay metnin arkasında gürültü yaratır: yalnızca metin bölgesini bulanıklaştır.
+    softened = picture.filter(ImageFilter.GaussianBlur(radius=max(width / 190, 3)))
+    picture = Image.composite(softened, picture, _content_feather_mask(picture.size, 0.85))
+    if amount > 0:
+        target = (0, 0, 0) if dark_art else (255, 255, 255)
+        shifted = Image.blend(picture, Image.new("RGB", picture.size, target), amount)
+        picture = Image.composite(shifted, picture, _content_feather_mask(picture.size, 1.0))
+    return picture, dark_art
+
+
+def _ai_full_theme(theme: ThemePreset, dark_art: bool) -> ThemePreset:
+    """Tema renklerini görselin parlaklığına göre okunur bir yazı/cam paletiyle değiştir.
+    Vurgu rengi (accent) temadan gelir ama kontrast için bir miktar açılır/koyulaştırılır."""
+    if dark_art:
+        return replace(
+            theme,
+            surface=(10, 16, 30), surface_alt=(10, 18, 34), border=(165, 186, 216),
+            title=(255, 255, 255), body=(236, 242, 250), muted=(196, 208, 224),
+            accent=_mix(theme.accent, (255, 255, 255), 0.38),
+            accent_alt=_mix(theme.accent_alt, (255, 255, 255), 0.30),
+        )
+    return replace(
+        theme,
+        surface=(255, 255, 255), surface_alt=(255, 255, 255), border=(140, 160, 188),
+        title=(16, 27, 44), body=(32, 46, 66), muted=(70, 86, 108),
+        accent=_mix(theme.accent, (0, 0, 0), 0.30),
+        accent_alt=_mix(theme.accent_alt, (0, 0, 0), 0.40),
+    )
+
+
+class _GlassDraw:
+    """ImageDraw sarmalayıcı: panelsiz tam-AI arka planda tüm yerleşim kodunu DEĞİŞTİRMEDEN
+    okunabilirlik sağlar. 3 değerli (opak) dolgulu dikdörtgenler buzlu cama, her yazı da
+    zıt renkli yumuşak bir haleyle çizilir; 4 değerli (zaten yarı saydam) dolgular, küçük
+    şeritler ve diğer tüm çizimler olduğu gibi geçer."""
+
+    def __init__(self, img: Image.Image, base: ImageDraw.ImageDraw):
+        self._img = img
+        self._base = base
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+    def rounded_rectangle(self, xy, radius=0, fill=None, outline=None, width=1, **kwargs):
+        x1, y1, x2, y2 = (int(round(v)) for v in xy)
+        glass = (
+            fill is not None and len(fill) == 3
+            and min(x2 - x1, y2 - y1) >= _GLASS_MIN_SIDE
+        )
+        if not glass:
+            return self._base.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width, **kwargs)
+        box = (max(x1, 0), max(y1, 0), min(x2, self._img.width), min(y2, self._img.height))
+        w, h = box[2] - box[0], box[3] - box[1]
+        if w > 0 and h > 0:
+            backdrop = self._img.crop(box).filter(ImageFilter.GaussianBlur(radius=14))
+            frosted = Image.blend(backdrop, Image.new("RGB", (w, h), tuple(fill)), _GLASS_ALPHA)
+            scale = 3
+            mask = Image.new("L", (w * scale, h * scale), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                (0, 0, w * scale - 1, h * scale - 1), radius=radius * scale, fill=255,
+            )
+            self._img.paste(frosted, (box[0], box[1]), mask.resize((w, h), Image.Resampling.LANCZOS))
+        if outline is not None:
+            edge = (*outline, 150) if len(outline) == 3 else outline
+            self._base.rounded_rectangle(xy, radius=radius, outline=edge, width=width)
+
+    def text(self, xy, text, fill=None, font=None, **kwargs):
+        if not (text and font is not None and str(text).strip() and isinstance(fill, tuple) and len(fill) >= 3):
+            return self._base.text(xy, text, fill=fill, font=font, **kwargs)
+        text = str(text)
+        left, top, right, bottom = (int(v) for v in self._base.textbbox(xy, text, font=font, **kwargs))
+        x1, y1 = max(left, 0), max(top, 0)
+        x2, y2 = min(right, self._img.width), min(bottom, self._img.height)
+        if x2 <= x1 or y2 <= y1:
+            # Tuvalin tamamen dışına taşan yazı: analiz edilecek zemin yok, düz çiz.
+            return self._base.text(xy, text, fill=fill, font=font, **kwargs)
+        region = self._img.crop((x1, y1, x2, y2))
+        stat = ImageStat.Stat(region)
+        background = tuple(stat.mean[:3])
+        busyness = sum(stat.stddev[:3]) / 3
+        color = tuple(fill[:3])
+        contrast = _contrast_ratio(color, background)
+        if contrast < _MIN_TEXT_CONTRAST:
+            # Bu yazının ARKASINDAKİ görsel, tema rengiyle okunamayacak kadar yakın: yerel olarak
+            # en çok kontrast veren açık/koyu renge geç (ör. koyu köşedeki küçük üst yazı).
+            color = max(_LIGHT_TEXT, _DARK_TEXT, key=lambda candidate: _contrast_ratio(candidate, background))
+            fill = (*color, *fill[3:])
+            contrast = _contrast_ratio(color, background)
+        need = _halo_need(contrast, busyness)
+        if need > 0:
+            light_text = _relative_luminance(color) > _relative_luminance(background)
+            self._halo_text(xy, text, font, (0, 0, 0) if light_text else (255, 255, 255), need, **kwargs)
+        return self._base.text(xy, text, fill=fill, font=font, **kwargs)
+
+    def _halo_text(self, xy, text: str, font, halo: tuple[int, int, int], strength: float, **kwargs) -> None:
+        left, top, right, bottom = (int(v) for v in self._base.textbbox(xy, text, font=font, **kwargs))
+        pad = max(10, int(font.size * 0.5))
+        size = (right - left + 2 * pad, bottom - top + 2 * pad)
+        if size[0] <= 0 or size[1] <= 0:
+            return
+        layer = Image.new("L", size, 0)
+        ImageDraw.Draw(layer).text(
+            (xy[0] - left + pad, xy[1] - top + pad), text, font=font, fill=255, **kwargs,
+        )
+        glow = layer.filter(ImageFilter.MaxFilter(3)).filter(
+            ImageFilter.GaussianBlur(radius=max(2.0, font.size * 0.10)),
+        )
+        gain = 2.0 * strength
+        glow = glow.point(lambda v: min(255, int(v * gain)))
+        self._img.paste(Image.new("RGB", size, halo), (left - pad, top - pad), glow)
+
+
+_LIGHT_TEXT = (248, 251, 255)
+_DARK_TEXT = (14, 24, 40)
+_MIN_TEXT_CONTRAST = 3.0
+
+
+def _relative_luminance(rgb) -> float:
+    r, g, b = (max(min(c, 255), 0) / 255 for c in rgb[:3])
+    return 0.2126 * r ** 2.2 + 0.7152 * g ** 2.2 + 0.0722 * b ** 2.2
+
+
+def _contrast_ratio(a, b) -> float:
+    la, lb = _relative_luminance(a), _relative_luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def _halo_need(contrast: float, busyness: float) -> float:
+    """0..1: yazının halesinin ne kadar güçlü olacağı. Düz bir zeminde (rozet, cam kart)
+    halo yazıyı yalnızca bulandırır — gerçek bir kullanıcı çıktısında rozet rakamlarını ve küçük
+    etiketleri lekeledi. Bu yüzden yalnızca kontrast sınırda ya da zemin yoğunken kullanılır."""
+    if busyness < 8 and contrast >= _MIN_TEXT_CONTRAST:
+        return 0.0
+    if contrast < 4.5:
+        return 1.0
+    if contrast < 7:
+        return 0.5 if busyness > 10 else 0.0
+    return 0.3 if busyness > 22 else 0.0
+
+
 def render_slide(slide: Slide, index: int, total: int, breadcrumb: str,
                  out_path: Path, width: int = 1920, height: int = 1080,
                  accent: tuple[int, int, int] | None = None,
@@ -802,19 +995,24 @@ def render_slide(slide: Slide, index: int, total: int, breadcrumb: str,
     has_ai_background = bool(
         slide.ai_background_image and Path(slide.ai_background_image).is_file()
     )
-    img = (
-        _render_ai_background(slide.ai_background_image, width, height, theme)
-        if has_ai_background else _gradient(width, height, start, end)
-    )
-    if not has_ai_background:
+    ai_full = has_ai_background and bool(slide.ai_background_full)
+    if ai_full:
+        img, dark_art = _render_ai_full_background(slide.ai_background_image, width, height)
+        theme = _ai_full_theme(theme, dark_art)
+    elif has_ai_background:
+        img = _render_ai_background(slide.ai_background_image, width, height, theme)
+    else:
+        img = _gradient(width, height, start, end)
         _decorate(img, theme)
     draw = ImageDraw.Draw(img, "RGBA")
+    if ai_full:
+        draw = _GlassDraw(img, draw)
 
     if slide.level == "chapter":
         _draw_chapter(img, draw, slide, index, total, theme)
     else:
         _draw_topic(img, draw, slide, index, total, breadcrumb, theme,
-                    has_ai_background=has_ai_background)
+                    has_ai_background=has_ai_background, ai_full=ai_full)
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path, quality=95)

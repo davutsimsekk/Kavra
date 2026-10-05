@@ -852,7 +852,8 @@ export default function App() {
             } : current)
             const added = job.result.imagesAdded || []
             const attempted = job.result.attemptedCount ?? added.length
-            const backgroundMode = job.result.mode === 'background'
+            const fullMode = job.result.mode === 'full_background'
+            const backgroundMode = job.result.mode === 'background' || fullMode
             let text
             if (!attempted) {
               text = backgroundMode ? 'AI arka planına uygun slayt bulunamadı.' : 'Görsel eklemeye uygun slayt bulunamadı.'
@@ -863,7 +864,9 @@ export default function App() {
             } else {
               const shown = added.slice(0, 8).map((a) => a.index).join(', ')
               const rest = added.length > 8 ? ` +${added.length - 8} diğer` : ''
-              if (backgroundMode) {
+              if (fullMode) {
+                text = `${added.length}/${attempted} slaytın tamamı yapay zeka arka planıyla oluşturuldu (panelsiz) — Slayt ${shown}${rest}.`
+              } else if (backgroundMode) {
                 text = `${added.length}/${attempted} slayta okunabilirlik perdesiyle AI arka planı eklendi — Slayt ${shown}${rest}.`
               } else {
                 const searchCount = added.filter((a) => a.source === 'search').length
@@ -1162,7 +1165,8 @@ export default function App() {
   const enrichImages = async (mode = 'support') => {
     if (!project?.slides.length || activeJob) return
     try {
-      const backgroundMode = mode === 'background'
+      const fullMode = mode === 'full_background'
+      const backgroundMode = mode === 'background' || fullMode
       const { eligibleCount, totalSlides } = await api(`${apiBase}/enrich-images/eligible-count?mode=${mode}`)
       if (!eligibleCount) {
         setToast({ type: 'success', text: backgroundMode
@@ -1170,11 +1174,13 @@ export default function App() {
           : 'Görsel eklenecek uygun slayt yok (bölüm kapakları, kod örnekli slaytlar ve zaten görseli olan slaytlar hariç tutulur).' })
         return
       }
-      const confirmation = backgroundMode
+      const confirmation = fullMode
+        ? `${eligibleCount}/${totalSlides} slaytın TÜM arka planı (eski beyaz içerik paneli dahil) yapay zekaya çizdirilecek; yalnızca yazılar ve kartlar üstüne binecek. Yazı rengi ve okunabilirlik görsele göre otomatik ayarlanır. Zaten yumuşatılmış AI arka planı olan slaytlar bu sürümle değiştirilir. Bu, slayt başına 1 gerçek Gemini görsel isteği demektir. Devam edilsin mi?`
+        : backgroundMode
         ? `${eligibleCount}/${totalSlides} slayt için 16:9 yapay zeka arka planı üretilecek. Metin okunabilirliği otomatik renk perdesiyle korunur. Bu, Gemini API'na gerçek istekler gönderir. Devam edilsin mi?`
         : `${eligibleCount}/${totalSlides} slaytta önce internetten gerçek bir görsel aranacak, bulunamazsa yapay zeka ile bir illüstrasyon üretilecek. Bu, Gemini API'na gerçek istekler gönderir. Devam edilsin mi?`
       if (!window.confirm(confirmation)) return
-      setJobState({ status: 'queued', progress: 0, message: backgroundMode ? 'AI arka planları hazırlanıyor' : 'Görsel zenginleştirme hazırlanıyor' })
+      setJobState({ status: 'queued', progress: 0, message: fullMode ? 'Tam AI arka planları hazırlanıyor' : backgroundMode ? 'AI arka planları hazırlanıyor' : 'Görsel zenginleştirme hazırlanıyor' })
       const response = await api(`${apiBase}/enrich-images`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey: visionApiKey.trim(), mode }),
@@ -1481,13 +1487,16 @@ export default function App() {
         {!bootstrap.keysConfigured.gemini && (
           <label className="field"><span>Gemini API anahtarı</span><input type="password" value={visionApiKey} onChange={(e) => setVisionApiKey(e.target.value)} placeholder="Gemini API anahtarın" /></label>
         )}
-        <div className="session-note wide"><ImageIcon size={14} /><span>Destek görselleri tanım, vurgu, formül ve çağrı slaytlarında boş kalan sağ sütuna; geniş düzenlerde içeriğin altına yerleşir. AI arka planı ise metnin arkasında kalır, otomatik yumuşatma ve renk perdesiyle yazı okunabilirliğini korur. Kod, kaynak sayfası veya destek görseli olan slaytlara arka plan eklenmez.</span></div>
+        <div className="session-note wide"><ImageIcon size={14} /><span>Destek görselleri tanım, vurgu, formül ve çağrı slaytlarında boş kalan sağ sütuna; geniş düzenlerde içeriğin altına yerleşir. AI arka planı metnin arkasında kalır, yumuşatma ve renk perdesiyle yazıyı korur. "Tamamen AI ile arka plan" ise slaytın tamamını (beyaz içerik paneli dahil) yapay zekaya çizdirir; yalnızca yazılar ve kartlar üstüne biner, yazı rengi görsele göre otomatik seçilir. Kod, kaynak sayfası veya destek görseli olan slaytlara arka plan eklenmez.</span></div>
         <div className="image-enrichment-actions">
           <button className="button primary" onClick={() => enrichImages('support')} disabled={!project?.slides.length || Boolean(activeJob)}>
-            <ImageIcon size={17} /> {activeJob?.type === 'enrichImages' && activeJob?.mode !== 'background' ? 'Görsel aranıyor/üretiliyor…' : 'Uygun slaytlara görsel ekle'}
+            <ImageIcon size={17} /> {activeJob?.type === 'enrichImages' && !['background', 'full_background'].includes(activeJob?.mode) ? 'Görsel aranıyor/üretiliyor…' : 'Uygun slaytlara görsel ekle'}
           </button>
           <button className="button" onClick={() => enrichImages('background')} disabled={!project?.slides.length || Boolean(activeJob)}>
             <WandSparkles size={17} /> {activeJob?.type === 'enrichImages' && activeJob?.mode === 'background' ? 'AI arka planları üretiliyor…' : 'AI arka planları oluştur'}
+          </button>
+          <button className="button" onClick={() => enrichImages('full_background')} disabled={!project?.slides.length || Boolean(activeJob)}>
+            <WandSparkles size={17} /> {activeJob?.type === 'enrichImages' && activeJob?.mode === 'full_background' ? 'Tam AI arka planları üretiliyor…' : 'Tamamen AI ile arka plan oluştur'}
           </button>
         </div>
         <ProgressStrip job={activeJob?.type === 'enrichImages' || jobState?.kind === 'enrichImages' ? jobState : null} />

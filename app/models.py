@@ -61,6 +61,11 @@ class Slide:
     # normal slayt çizimini atlar; bu alan ise tam tersine mevcut düzeni korur ve
     # renderer tarafından okunabilir bir renk perdesiyle yumuşatılır.
     ai_background_image: str | None = None
+    # True ise `ai_background_image` TÜM slaytın tek görseli olarak kullanılır: büyük içerik
+    # paneli çizilmez, yalnızca metin/kartlar buzlu cam ve okunabilirlik halesiyle görselin
+    # ÜSTÜNE biner (bkz. app/video/slide_renderer.py `_render_ai_full_background`). False
+    # (eski davranış) görseli panelin ardında yumuşatılmış perde olarak bırakır.
+    ai_background_full: bool = False
     # "Diyagram/görsel çıkar" modunda: kaynak sayfadan çıkarılmış GERÇEK
     # (üretilmemiş) bir görselin yolu. Doluysa render_slide dar içerik
     # düzenlerinde sağ sütuna, geniş içerik düzenlerinde alt banda yerleştirir —
@@ -87,6 +92,7 @@ class Slide:
             "manuallyEdited": self.manually_edited,
             "backgroundImage": self.background_image,
             "aiBackgroundImage": self.ai_background_image,
+            "aiBackgroundFull": self.ai_background_full,
             "embeddedImage": self.embedded_image,
             "imageSource": self.image_source,
         }
@@ -105,6 +111,7 @@ class Slide:
             manually_edited=bool(d.get("manuallyEdited", False)),
             background_image=d.get("backgroundImage"),
             ai_background_image=d.get("aiBackgroundImage"),
+            ai_background_full=bool(d.get("aiBackgroundFull", False)),
             embedded_image=d.get("embeddedImage"),
             image_source=d.get("imageSource"),
         )

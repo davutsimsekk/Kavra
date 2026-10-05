@@ -520,14 +520,14 @@ def get_enrich_images_eligible_count(project_id: str, video_id: str | None = Non
     göstermek için — bkz. app.image_enrichment.eligible_for_enrichment. Gerçek
     maliyet Gemini tarafından bildirilmediğinden (app/cost_ledger.py'deki ilke) burada
     tahmini bir ücret DEĞİL, sadece istek sayısı gösterilir."""
-    from app.image_enrichment import ENRICHMENT_MODES, eligible_for_background, eligible_for_enrichment
+    from app.image_enrichment import ENRICHMENT_MODES, eligibility_for_mode
 
     if mode not in ENRICHMENT_MODES:
-        raise HTTPException(400, "Görsel modu 'support' veya 'background' olmalı.")
+        raise HTTPException(400, "Görsel modu 'support', 'background' veya 'full_background' olmalı.")
 
     pdir = _workspace_dir(project_id, video_id)
     slides = _slides_or_empty(pdir)
-    eligibility = eligible_for_background if mode == "background" else eligible_for_enrichment
+    eligibility = eligibility_for_mode(mode)
     eligible_count = sum(1 for s in slides if eligibility(s, force))
     return {"eligibleCount": eligible_count, "totalSlides": len(slides)}
 
@@ -549,23 +549,21 @@ def enrich_images(project_id: str, payload: dict = Body(...), video_id: str | No
 
     mode = str(payload.get("mode", "support")).strip().lower()
     if mode not in ENRICHMENT_MODES:
-        raise HTTPException(400, "Görsel modu 'support' veya 'background' olmalı.")
+        raise HTTPException(400, "Görsel modu 'support', 'background' veya 'full_background' olmalı.")
     force = bool(payload.get("force", False))
     api_key = str(payload.get("apiKey", "")).strip() or get_api_key("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(400, "Görsel zenginleştirme için bir Gemini API anahtarı gerekli.")
 
     def work(job_id: str):
-        from app.image_enrichment import (
-            eligible_for_background, eligible_for_enrichment, enrich_slides_with_images,
-        )
+        from app.image_enrichment import eligibility_for_mode, enrich_slides_with_images
 
         current_slides = _slides_or_empty(pdir)
         # "force" açıkken zaten görseli olan slaytlar da uygun sayılır (üzerine yazılır) —
         # bu yüzden "eklendi" saymak için önce/sonra karşılaştırması değil, "denendi VE
         # sonunda bir görseli var mı" bakılır (force'ta yol aynı kalıp içerik değişebilir,
         # bir string karşılaştırması güvenilir olmazdı).
-        eligibility = eligible_for_background if mode == "background" else eligible_for_enrichment
+        eligibility = eligibility_for_mode(mode)
         eligible_indices = [i for i, s in enumerate(current_slides) if eligibility(s, force)]
 
         def on_progress(done: int, total: int, title: str) -> None:
@@ -577,17 +575,17 @@ def enrich_images(project_id: str, payload: dict = Body(...), video_id: str | No
         enrich_kwargs = {"force": force, "progress_cb": on_progress}
         # Varsayılan destek-görsel çağrısının eski eklentiler/test doubles ile imzası
         # değişmesin; yeni anahtar yalnızca gerçekten arka plan istendiğinde gönderilir.
-        if mode == "background":
+        if mode != "support":
             enrich_kwargs["mode"] = mode
         updated = enrich_slides_with_images(pdir, current_slides, api_key, **enrich_kwargs)
         added = [
             {
                 "index": i + 1,
                 "title": updated[i].title,
-                "source": "generated" if mode == "background" else updated[i].image_source,
+                "source": "generated" if mode != "support" else updated[i].image_source,
             }
             for i in eligible_indices
-            if (updated[i].ai_background_image if mode == "background" else updated[i].embedded_image)
+            if (updated[i].ai_background_image if mode != "support" else updated[i].embedded_image)
         ]
         return {
             "slides": [slide.to_dict() for slide in updated],

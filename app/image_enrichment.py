@@ -17,6 +17,7 @@ durduran bir hataya yol açmamalı, en kötü ihtimalle slayt görselsiz kalır.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
@@ -28,7 +29,9 @@ from app.models import Slide
 
 DEFAULT_SEARCH_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
-ENRICHMENT_MODES = {"support", "background"}
+# "support": slayda eşlik eden destek görseli · "background": panelin ARKASINDA yumuşatılmış
+# YZ arka planı · "full_background": tüm slayt YZ görseli, yalnızca metin/kartlar üstüne biner.
+ENRICHMENT_MODES = {"support", "background", "full_background"}
 
 # enrich_slides_with_images'ta kaç slaytın görseli AYNI ANDA aranıp/üretilsin — bu tamamen
 # ağ G/Ç'ye bağlı (CPU değil), bu yüzden pass3'ün render paralelliğinden (CPU çekirdek
@@ -188,6 +191,101 @@ def _background_generation_prompt(slide: Slide) -> str:
     )
 
 
+# Tam AI arka plan için üretilen görselde yazı/panel çıkarsa yeniden üretilecek azami deneme.
+MAX_FULL_BACKGROUND_ATTEMPTS = 3
+
+_CONCEPT_PROMPT = (
+    "You write art direction for abstract lecture-slide backgrounds.\n"
+    "Slide topic (may be in Turkish): {title}\n"
+    "Lecture context: {context}\n\n"
+    "In ONE English sentence of at most 30 words, describe an abstract, purely visual atmosphere "
+    "(light, color mood, flowing shapes, a subtle metaphor for the subject) for the background "
+    "artwork. NEVER quote or include any words, names, labels, acronyms or numbers from the topic; "
+    "describe only shapes, light and colors. Reply with that single sentence and nothing else."
+)
+
+_TEXT_CHECK_PROMPT = (
+    "Look at this image. Does it contain ANY readable, blurred or ghosted text, letters, words, "
+    "numbers, captions, labels, logos, or UI-like boxes/panels/frames meant to hold content? "
+    "Answer with exactly one word: YES or NO."
+)
+
+
+def _full_background_generation_prompt(slide: Slide, concept: str | None = None) -> str:
+    """TÜM slayt tuvalini (eski beyaz içerik paneli dahil) kaplayan arka plan için tarif.
+
+    Gerçek üretimle bulunan iki sorun bu şekle yol açtı: (1) başlık/anlatım metni tırnak içinde
+    prompt'a verilince model BAŞLIĞI görselin ortasına yazıyordu (hayalet yazı) ya da sahte
+    "kernel files / config" etiketli bir diyagram + çerçeve çiziyordu — bu yüzden slaytın
+    başlığı/anlatımı prompt'a ASLA birebir konmaz, yalnızca `concept` (kısa, İngilizce,
+    kelimesiz bir görsel atmosfer cümlesi — bkz. _visual_concept) verilir; (2) "orta %70 sakin,
+    detay yalnızca kenar/köşelerde" yönergesi metnin bineceği merkezi boş bırakırken sanatı
+    slaytın çerçevesi gibi görünür kılıyor. Panel/kart/çerçeve çizmesi ve HER TÜRLÜ yazı açıkça
+    yasaklı — aksi halde model kendi kutusunu çizip renderer'ın okunabilirlik katmanıyla çakışıyor."""
+    theme = (
+        f"Visual theme (inspiration only — express it as mood, light and shapes, never as words): {concept} "
+        if concept else "Purely abstract artwork with no specific subject. "
+    )
+    return (
+        "Create a COMPLETE 16:9 lecture-slide background artwork covering the entire canvas "
+        f"edge to edge. {theme}"
+        "Atmospheric editorial illustration: soft luminous gradients and subtle abstract shapes, "
+        "one cohesive muted palette, gentle depth. "
+        "Composition built for overlaid lesson text: keep the central ~70% of the canvas calm, "
+        "evenly lit and low-contrast with no focal objects, no sharp details and no busy "
+        "patterns; place the richer visual interest only along the outer edges and corners. "
+        "Do NOT draw any panel, card, frame, border, white box, banner, button or UI element. "
+        "ABSOLUTELY NO TEXT of any kind anywhere in the image: no words, letters, numbers, "
+        "symbols, captions, titles, signs, or blurred/ghosted lettering. "
+        "No logos, no watermark, no diagram, no chart, no table, no code."
+    )
+
+
+def _count(usage: dict | None) -> None:
+    if usage is not None:
+        usage["requests"] = usage.get("requests", 0) + 1
+
+
+def _visual_concept(slide: Slide, api_key: str, model: str, usage: dict | None = None) -> str | None:
+    """Slaytın konusundan kelimesiz, İngilizce bir görsel atmosfer cümlesi. Başarısız olursa
+    None döner — çağıran taraf konusuz soyut bir arka plana düşer, üretimi ASLA durdurmaz."""
+    context = " ".join((slide.narration or "").split())[:420]
+    try:
+        client = _client(api_key)
+        prompt = _CONCEPT_PROMPT.format(title=slide.title, context=context)
+
+        def _run():
+            return client.models.generate_content(model=model, contents=prompt)
+
+        _count(usage)
+        text = " ".join((call_with_retry(_run, feature_name="görsel zenginleştirme").text or "").split())
+    except Exception:
+        return None
+    return text[:400] or None
+
+
+def _contains_text_or_panels(image_bytes: bytes, api_key: str, usage: dict | None = None) -> bool:
+    """Üretilen arka planda okunabilir/bulanık yazı ya da içerik kutusu benzeri bir şey var mı?
+    Ucuz bir görsel model çağrısı; gerçek örneklerde yazılı/etiketli görselleri doğru yakaladı.
+    Çağrı başarısız olursa (ağ, kota) FALSE döner (açık-kapı): kontrol bir güvenlik ağıdır,
+    üretimi bloklamamalı."""
+    try:
+        from google.genai import types
+        from app.vision_caption import DEFAULT_VISION_MODEL
+
+        client = _client(api_key)
+        contents = [_TEXT_CHECK_PROMPT, types.Part.from_bytes(data=image_bytes, mime_type="image/png")]
+
+        def _run():
+            return client.models.generate_content(model=DEFAULT_VISION_MODEL, contents=contents)
+
+        _count(usage)
+        answer = (call_with_retry(_run, feature_name="görsel zenginleştirme").text or "").strip().upper()
+    except Exception:
+        return False
+    return answer.startswith("YES")
+
+
 def find_image_for_slide(slide: Slide, api_key: str, search_model: str = DEFAULT_SEARCH_MODEL,
                          image_model: str = DEFAULT_IMAGE_MODEL) -> tuple[bytes, str, str] | None:
     """Bir slayt için görsel bulur/üretir. Dönüş: (görsel_baytları, uzantı, kaynak) —
@@ -210,11 +308,33 @@ def find_image_for_slide(slide: Slide, api_key: str, search_model: str = DEFAULT
 
 
 def find_background_for_slide(
-    slide: Slide, api_key: str, image_model: str = DEFAULT_IMAGE_MODEL,
+    slide: Slide, api_key: str, image_model: str = DEFAULT_IMAGE_MODEL, full: bool = False,
+    usage: dict | None = None,
 ) -> tuple[bytes, str, str] | None:
-    """Arama yapmadan, metin bindirmeye uygun dekoratif bir arka plan üretir."""
-    generated = _generate_image(_background_generation_prompt(slide), api_key, image_model)
-    return (generated[0], generated[1], "generated") if generated else None
+    """Arama yapmadan, metin bindirmeye uygun dekoratif bir arka plan üretir.
+
+    `full=True` tüm slayt tuvalini kaplayan (panelsiz) sürümdür: önce slayttan kelimesiz bir görsel
+    konsept üretilir, görsel üretilir, sonra görselde YAZI/panel var mı diye kontrol edilir; varsa
+    en fazla MAX_FULL_BACKGROUND_ATTEMPTS denemeye kadar yeniden üretilir. Hepsi temiz çıkmazsa
+    None döner (slayt arka plansız kalır — hayalet yazılı bir slayttan iyidir).
+
+    `usage` verilirse {"requests": N} olarak GERÇEKTEN yapılan API çağrı sayısı yazılır (maliyet
+    kaydı, bkz. app/cost_ledger.py — iş parçacığında dosya yazılmaz, sayıyı ana iş parçacığı kaydeder)."""
+    if not full:
+        _count(usage)
+        generated = _generate_image(_background_generation_prompt(slide), api_key, image_model)
+        return (generated[0], generated[1], "generated") if generated else None
+
+    concept = _visual_concept(slide, api_key, DEFAULT_SEARCH_MODEL, usage)
+    prompt = _full_background_generation_prompt(slide, concept)
+    for _attempt in range(MAX_FULL_BACKGROUND_ATTEMPTS):
+        _count(usage)
+        generated = _generate_image(prompt, api_key, image_model)
+        if generated is None:
+            continue
+        if not _contains_text_or_panels(generated[0], api_key, usage):
+            return generated[0], generated[1], "generated"
+    return None
 
 
 def eligible_for_enrichment(slide: Slide, force: bool = False) -> bool:
@@ -249,6 +369,29 @@ def eligible_for_background(slide: Slide, force: bool = False) -> bool:
     return True
 
 
+def eligible_for_full_background(slide: Slide, force: bool = False) -> bool:
+    """Tam ekran YZ arka planı için uygunluk. `eligible_for_background` ile aynı dışlamalar
+    (kod, kaynak sayfası, destek görseli), ama ONDAN FARKLI olarak zaten yumuşatılmış
+    (panel arkası) bir YZ arka planı olan slayt da uygundur — kullanıcı mevcut arka planları
+    "tamamen YZ" sürümüne dönüştürmek için `force` vermek zorunda kalmamalı. Yalnızca zaten
+    tam ekran arka planı olan slayt (force yoksa) atlanır — boşa API çağrısı olmasın."""
+    if slide.code or slide.background_image or slide.embedded_image:
+        return False
+    if slide.ai_background_image and slide.ai_background_full and not force:
+        return False
+    return True
+
+
+def eligibility_for_mode(mode: str) -> Callable[[Slide, bool], bool]:
+    """Moda göre uygunluk fonksiyonu — API'nin eligible-count / iş / özet kodu aynı seçimi
+    tekrar tekrar if-zincirleriyle yapmasın (biri unutulursa sayı ile iş birbirinden sapardı)."""
+    if mode == "full_background":
+        return eligible_for_full_background
+    if mode == "background":
+        return eligible_for_background
+    return eligible_for_enrichment
+
+
 def enrich_slides_with_images(
     pdir: Path, slides: list[Slide], api_key: str, force: bool = False,
     progress_cb: Callable[[int, int, str], None] | None = None,
@@ -274,20 +417,33 @@ def enrich_slides_with_images(
     if mode not in ENRICHMENT_MODES:
         raise ValueError(f"Bilinmeyen görsel zenginleştirme modu: {mode!r}")
 
-    background_mode = mode == "background"
+    full_mode = mode == "full_background"
+    background_mode = mode in ("background", "full_background")
     images_dir = pdir / "assets" / ("backgrounds" if background_mode else "images")
     images_dir.mkdir(parents=True, exist_ok=True)
 
-    eligibility = eligible_for_background if background_mode else eligible_for_enrichment
+    eligibility = (
+        eligible_for_full_background if full_mode
+        else eligible_for_background if background_mode
+        else eligible_for_enrichment
+    )
     eligible_indices = [i for i, s in enumerate(slides) if eligibility(s, force)]
     total = len(eligible_indices)
     if total == 0:
         return slides
 
     def work(index: int):
-        if background_mode:
-            return find_background_for_slide(slides[index], api_key)
-        return find_image_for_slide(slides[index], api_key)
+        """Dönüş: (sonuç, gerçekten yapılan API çağrı sayısı, istisna). İstisna burada yakalanır ki
+        hata öncesi yapılan çağrılar da maliyet kaydına girsin."""
+        usage = {"requests": 0}
+        try:
+            if background_mode:
+                result = find_background_for_slide(slides[index], api_key, full=full_mode, usage=usage)
+            else:
+                result = find_image_for_slide(slides[index], api_key)
+            return result, usage["requests"], None
+        except Exception as exc:
+            return None, usage["requests"], exc
 
     done = 0
     with ThreadPoolExecutor(max_workers=min(max_workers, total), thread_name_prefix="image-enrich") as pool:
@@ -295,16 +451,21 @@ def enrich_slides_with_images(
         for future in as_completed(futures):
             index = futures[future]
             slide = slides[index]
-            try:
-                result = future.result()
-            except Exception:
-                kind = "image_background_error" if background_mode else "image_enrich_error"
-                record_cost(pdir, provider="gemini", kind=kind, requests=1)
+            result, request_count, error = future.result()
+            if error is not None:
+                kind = (
+                    "image_background_full_error" if full_mode
+                    else "image_background_error" if background_mode else "image_enrich_error"
+                )
+                record_cost(pdir, provider="gemini", kind=kind, requests=max(request_count, 1))
                 result = None
                 errored = True
             else:
-                kind = "image_background" if background_mode else "image_enrich"
-                record_cost(pdir, provider="gemini", kind=kind, requests=1)
+                kind = (
+                    "image_background_full" if full_mode
+                    else "image_background" if background_mode else "image_enrich"
+                )
+                record_cost(pdir, provider="gemini", kind=kind, requests=max(request_count, 1))
                 errored = False
             done += 1
             if progress_cb:
@@ -312,11 +473,24 @@ def enrich_slides_with_images(
             if errored or result is None:
                 continue
             image_bytes, ext, source = result
-            suffix = "_background" if background_mode else ""
-            image_path = images_dir / f"slide_{index + 1:03d}{suffix}.{ext}"
+            if full_mode:
+                # Dosya adına içerik özeti eklenir: force ile yeniden üretilince YOL değişir,
+                # aksi halde aynı yol → aynı render önbellek anahtarı → eski görsel gösterilirdi.
+                digest = hashlib.sha256(image_bytes).hexdigest()[:8]
+                image_path = images_dir / f"slide_{index + 1:03d}_background_full_{digest}.{ext}"
+            else:
+                suffix = "_background" if background_mode else ""
+                image_path = images_dir / f"slide_{index + 1:03d}{suffix}.{ext}"
             image_path.write_bytes(image_bytes)
             if background_mode:
+                previous = slide.ai_background_image
                 slide.ai_background_image = str(image_path)
+                slide.ai_background_full = full_mode
+                # Değiştirilen (artık hiçbir slaytta kullanılmayan) eski tam-ekran dosyası birikmesin.
+                if previous and previous != str(image_path):
+                    old = Path(previous)
+                    if old.parent == images_dir and "_background_full_" in old.name:
+                        old.unlink(missing_ok=True)
             else:
                 slide.embedded_image = str(image_path)
                 slide.image_source = source

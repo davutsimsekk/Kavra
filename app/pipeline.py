@@ -166,7 +166,7 @@ def _renderable_signature(slide: Slide) -> dict:
     once already (2026-09-13) when source tracking was added; keep this
     narrow on purpose.
     """
-    return {
+    signature = {
         "title": slide.title,
         "bullets": slide.bullets,
         "layout": slide.layout,
@@ -184,6 +184,12 @@ def _renderable_signature(slide: Slide) -> dict:
         "narration": slide.narration,
         "level": slide.level,
     }
+    # Yalnızca "tam AI arka plan" açıkken eklenir — alan her slayta koşulsuz yazılsaydı
+    # (yukarıdaki docstring'in uyardığı gibi) tüm mevcut render önbellekleri bir anda
+    # geçersiz kalırdı.
+    if slide.ai_background_full:
+        signature["ai_background_full"] = True
+    return signature
 
 
 def _slide_hash(slide: Slide, tts_provider: str, voice: str, rate: str, opts: VideoOptions) -> str:
